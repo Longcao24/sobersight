@@ -52,7 +52,12 @@ export default function Home() {
 
         <Pressable style={styles.runBtn} onPress={() => router.push('/run' as any)}>
           <Text style={styles.runBtnText}>Start Session</Text>
-          <Text style={styles.runBtnSub}>PLR → Horizontal → Vertical</Text>
+          <Text style={styles.runBtnSub}>PLR → Horizontal gaze</Text>
+        </Pressable>
+
+        <Pressable style={styles.voiceBtn} onPress={() => router.push('/voice' as any)}>
+          <Text style={styles.voiceBtnText}>Voice Command Task</Text>
+          <Text style={styles.voiceBtnSub}>10 rounds · in-vehicle spoken commands</Text>
         </Pressable>
 
         <Pressable style={styles.historyBtn} onPress={() => router.push('/history')}>
@@ -97,6 +102,19 @@ const styles = StyleSheet.create({
   },
   runBtnText: { color: '#06281F', fontSize: 18, fontWeight: '800' },
   runBtnSub: { color: '#06281F', fontSize: 12, fontWeight: '600', opacity: 0.75 },
+  voiceBtn: {
+    minHeight: 64,
+    backgroundColor: COLORS.card,
+    borderWidth: 1,
+    borderColor: COLORS.accent2,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2,
+    marginTop: 4,
+  },
+  voiceBtnText: { color: COLORS.text, fontSize: 17, fontWeight: '800' },
+  voiceBtnSub: { color: COLORS.subtle, fontSize: 12, fontWeight: '600' },
   historyBtn: {
     minHeight: MIN_TAP,
     borderWidth: 1,

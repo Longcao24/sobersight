@@ -1,53 +1,58 @@
 import { useEffect, useRef, useState } from 'react';
-import { Animated, Dimensions, Easing, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
 import * as Speech from 'expo-speech';
-import { StimulusDotAnimated } from '@/components/StimulusDot';
-import { COLORS, DOT_SIZE, EDGE_PADDING, MIN_TAP } from '@/lib/theme';
-import type { GazeDirection, GazePhase, GazeTrial } from '@/lib/types';
+import { COLORS } from '@/lib/theme';
+import type { GazePhase, GazeTrial } from '@/lib/types';
 
-// Phase timing (ms) — fixed durations are the source of truth for the data.
-// Each direction: 1s linear move, then 1s stop at the end edge.
-const MOVE_MS = 1000;
-const STOP_MS = 1000;
+// Examiner-guided horizontal gaze. The EXAMINER reads these on-screen cues and
+// moves a raised finger; the participant follows the finger with their eyes
+// while the rear camera records one eye. Raw data collection only — no scoring.
+//
+// Movement sequence (repeated REPS times):
+//   center → move RIGHT (3s) → hold RIGHT (1s) → back to center (3s)
+//          → move LEFT  (3s) → hold LEFT  (1s) → back to center (3s)
+// A lead-in center hold ensures recording is already running before the first
+// movement begins.
 
-const PHASE_LABEL: Record<GazePhase, string> = { hold: 'Hold', move: 'Move', stop: 'Stop' };
+const MOVE_MS = 3000;
+const HOLD_MS = 1000;
+const LEAD_IN_MS = 3000; // initial center hold before the first movement
+const REPS = 3;
 
 const nowISO = () => new Date().toISOString();
-const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+// One phase of the on-screen guide. `arrow` drives the big direction indicator.
+interface PhaseDef {
+  phase: GazePhase;
+  ms: number;
+  title: string; // big examiner instruction
+  voice: string; // spoken cue
+  arrow: '◀' | '▶' | '●';
+}
+
+function repPhases(): PhaseDef[] {
+  return [
+    { phase: 'move_right', ms: MOVE_MS, title: "Move to participant's RIGHT", voice: "Move your finger slowly to the participant's right.", arrow: '▶' },
+    { phase: 'hold_right', ms: HOLD_MS, title: 'Hold RIGHT', voice: 'Hold.', arrow: '▶' },
+    { phase: 'center_from_right', ms: MOVE_MS, title: 'Back to CENTER', voice: 'Move back to center.', arrow: '●' },
+    { phase: 'move_left', ms: MOVE_MS, title: "Move to participant's LEFT", voice: "Move your finger slowly to the participant's left.", arrow: '◀' },
+    { phase: 'hold_left', ms: HOLD_MS, title: 'Hold LEFT', voice: 'Hold.', arrow: '◀' },
+    { phase: 'center_from_left', ms: MOVE_MS, title: 'Back to CENTER', voice: 'Move back to center.', arrow: '●' },
+  ];
+}
 
 interface Props {
-  protocolLabel: string; // "Horizontal Gaze" | "Vertical Gaze"
-  axis: 'x' | 'y';
-  directions: [GazeDirection, GazeDirection]; // per-rep order, e.g. ['right','left']
   onDone: (trials: GazeTrial[], completed: boolean) => void;
 }
 
-export function GazeRunner({ protocolLabel, axis, directions, onDone }: Props) {
-  const { width, height } = Dimensions.get('window');
+export function GazeRunner({ onDone }: Props) {
+  const insets = useSafeAreaInsets();
 
-  // Travel endpoints, edge-to-edge with EDGE_PADDING.
-  const moveStartEdge = EDGE_PADDING;
-  const moveEndEdge = (axis === 'x' ? width : height) - EDGE_PADDING - DOT_SIZE;
-  const fixedAxisCenter = (axis === 'x' ? height : width) / 2 - DOT_SIZE / 2;
-
-  // Per direction the dot's start edge; the opposite edge is the move target.
-  // Direction name == the ACTUAL eye-movement direction during the move phase.
-  // Coords: x → moveStartEdge=left, moveEndEdge=right.  y → moveStartEdge=top, moveEndEdge=bottom.
-  //   right: start left   → move right (toward moveEndEdge)
-  //   left:  start right   → move left  (toward moveStartEdge)
-  //   down:  start top     → move down  (toward moveEndEdge)
-  //   up:    start bottom  → move up    (toward moveStartEdge)
-  const startEdgeFor = (dir: GazeDirection): number =>
-    dir === 'right' || dir === 'down' ? moveStartEdge : moveEndEdge;
-  const endEdgeFor = (dir: GazeDirection): number =>
-    dir === 'right' || dir === 'down' ? moveEndEdge : moveStartEdge;
-
-  // Animated value drives the moving axis only.
-  const moveCoord = useRef(new Animated.Value(startEdgeFor(directions[0]))).current;
-
-  const [progress, setProgress] = useState('');
-  const [phaseLabel, setPhaseLabel] = useState('');
+  const [title, setTitle] = useState('Get ready');
+  const [arrow, setArrow] = useState<'◀' | '▶' | '●'>('●');
+  const [repLabel, setRepLabel] = useState('');
   const [remaining, setRemaining] = useState(0); // seconds, display only
 
   const cancelled = useRef(false);
@@ -56,25 +61,10 @@ export function GazeRunner({ protocolLabel, axis, directions, onDone }: Props) {
   const timers = useRef<{ cancel: () => void }[]>([]);
   const deadline = useRef(0); // ms epoch; 0 = no countdown
 
-  // Cancellable sleep — exit resolves it early.
   const sleep = (ms: number) =>
     new Promise<void>((resolve) => {
       const id = setTimeout(resolve, ms);
       timers.current.push({ cancel: () => { clearTimeout(id); resolve(); } });
-    });
-
-  // LINEAR EASING ONLY — constant velocity is critical for nystagmus detection.
-  // Do NOT change Easing.linear to any ease-in/out curve.
-  const animateLinear = (to: number, ms: number) =>
-    new Promise<void>((resolve) => {
-      const anim = Animated.timing(moveCoord, {
-        toValue: to,
-        duration: ms,
-        easing: Easing.linear,
-        useNativeDriver: true,
-      });
-      anim.start(() => resolve());
-      timers.current.push({ cancel: () => { anim.stop(); resolve(); } });
     });
 
   const finish = (completed: boolean) => {
@@ -89,6 +79,23 @@ export function GazeRunner({ protocolLabel, axis, directions, onDone }: Props) {
     timers.current.forEach((t) => t.cancel());
   };
 
+  // Run one timed phase: log its start/end and drive the on-screen guide.
+  const runPhase = async (def: PhaseDef, rep: number, countdown: boolean) => {
+    const trial: GazeTrial = { phase: def.phase, rep, start_time: nowISO(), end_time: null };
+    trialsRef.current.push(trial);
+
+    setTitle(def.title);
+    setArrow(def.arrow);
+    Haptics.impactAsync(
+      def.arrow === '●' ? Haptics.ImpactFeedbackStyle.Light : Haptics.ImpactFeedbackStyle.Heavy,
+    ).catch(() => {});
+    Speech.speak(def.voice, { rate: 0.95 });
+
+    deadline.current = countdown ? Date.now() + def.ms : 0;
+    await sleep(def.ms);
+    trial.end_time = nowISO();
+  };
+
   // Display countdown ticker.
   useEffect(() => {
     const id = setInterval(() => {
@@ -98,121 +105,115 @@ export function GazeRunner({ protocolLabel, axis, directions, onDone }: Props) {
     return () => clearInterval(id);
   }, []);
 
-  // Protocol sequence runner.
+  // Phase sequence runner.
   useEffect(() => {
-    // Spoken intro — participant relies entirely on voice (cannot see screen).
-    Speech.speak('Keep your head still and follow the spoken directions with your eyes.', { rate: 0.92 });
-
-    // Voice-over fully guides the eyes — participant cannot see the screen
-    // (back-camera rig). Phrased by the dot's real start position + move direction.
-    const VOICE: Record<GazeDirection, { start: string; move: string }> = {
-      right: { start: 'far left', move: 'to the right' },
-      left: { start: 'far right', move: 'to the left' },
-      up: { start: 'down', move: 'up' },
-      down: { start: 'up', move: 'down' },
-    };
-
     (async () => {
-      // Initial orientation only — get the eyes to the first start position.
-      // Not a counted trial; just positions before the timed movements begin.
-      moveCoord.setValue(startEdgeFor(directions[0]));
-      setProgress(`${protocolLabel} · Get ready`);
-      setPhaseLabel('Look ' + VOICE[directions[0]].start);
-      Speech.speak(`Look ${VOICE[directions[0]].start} to begin.`, { rate: 0.92 });
-      await sleep(2000);
+      // Lead-in center hold — recording is already rolling; gets the finger and
+      // the participant's eyes centered before the first movement.
+      setRepLabel('Setup');
+      await runPhase(
+        { phase: 'center', ms: LEAD_IN_MS, title: 'Hold finger at CENTER', voice: "Hold your finger at the center and have the participant look at it.", arrow: '●' },
+        0,
+        true,
+      );
       if (cancelled.current) return finish(false);
 
-      for (let rep = 1; rep <= 2; rep++) {
-        for (const dir of directions) {
-          // Each direction = 5s linear MOVE, then 1s STOP at the end edge.
-          for (const phase of ['move', 'stop'] as GazePhase[]) {
-            if (cancelled.current) return finish(false);
-
-            const trial: GazeTrial = { direction: dir, phase, rep, start_time: nowISO(), end_time: null };
-            trialsRef.current.push(trial);
-
-            setProgress(`${protocolLabel} · Rep ${rep} of 2 · ${cap(dir)}`);
-            setPhaseLabel(PHASE_LABEL[phase]);
-            // Haptic at every phase transition; heavier on the moving phase.
-            Haptics.impactAsync(
-              phase === 'move' ? Haptics.ImpactFeedbackStyle.Heavy : Haptics.ImpactFeedbackStyle.Light,
-            ).catch(() => {});
-            Speech.speak(
-              phase === 'move' ? `Slowly move your eyes ${VOICE[dir].move}.` : 'Stop. Hold still.',
-              { rate: 0.92 },
-            );
-
-            if (phase === 'move') {
-              deadline.current = Date.now() + MOVE_MS;
-              await animateLinear(endEdgeFor(dir), MOVE_MS);
-            } else {
-              deadline.current = 0; // no countdown during stop
-              moveCoord.setValue(endEdgeFor(dir));
-              await sleep(STOP_MS);
-            }
-
-            trial.end_time = nowISO();
-          }
+      for (let rep = 1; rep <= REPS; rep++) {
+        setRepLabel(`Sequence ${rep} of ${REPS}`);
+        for (const def of repPhases()) {
+          if (cancelled.current) return finish(false);
+          await runPhase(def, rep, true);
         }
       }
       finish(true);
     })();
 
-    return () => { cancelled.current = true; timers.current.forEach((t) => t.cancel()); Speech.stop(); };
+    return () => {
+      cancelled.current = true;
+      timers.current.forEach((t) => t.cancel());
+      Speech.stop();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const dotStyle =
-    axis === 'x'
-      ? { transform: [{ translateX: moveCoord }, { translateY: fixedAxisCenter }] }
-      : { transform: [{ translateX: fixedAxisCenter }, { translateY: moveCoord }] };
-
   return (
     <View style={styles.root}>
-      <Text style={styles.rec} pointerEvents="none">● REC</Text>
-      <Text style={styles.progress}>{progress}</Text>
+      {/* Top bar — operator-facing (rear camera points at the participant's eye) */}
+      <View style={[styles.topBar, { paddingTop: insets.top + 6 }]} pointerEvents="none">
+        <Text style={styles.rec}>● REC</Text>
+        <Text style={styles.repLabel}>{repLabel}</Text>
+        <View style={styles.badge}><Text style={styles.badgeText}>GAZE</Text></View>
+      </View>
 
-      <StimulusDotAnimated style={dotStyle} />
-
-      <View style={styles.footer} pointerEvents="none">
-        <Text style={styles.phase}>{phaseLabel}</Text>
+      <View style={styles.center} pointerEvents="none">
+        <Text style={styles.arrow}>{arrow}</Text>
+        <Text style={styles.title}>{title}</Text>
         {remaining > 0 && <Text style={styles.countdown}>{remaining}</Text>}
       </View>
 
-      <Pressable style={styles.exit} onPress={exit} hitSlop={12}>
-        <Text style={styles.exitText}>✕</Text>
-      </Pressable>
+      <View style={[styles.bottom, { paddingBottom: insets.bottom + 10 }]} pointerEvents="box-none">
+        <Text style={styles.hint} pointerEvents="none">
+          Keep the rear camera on one eye · participant follows your finger · head still
+        </Text>
+        <Pressable style={styles.endBtn} onLongPress={exit} delayLongPress={900}>
+          <Text style={styles.endText}>■ Hold to End Session</Text>
+        </Pressable>
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  // Transparent so the full-screen recording camera shows through as a live
-  // preview behind the dot (same path as PLR). Participant uses the eye-mount
-  // rig and can't see the screen — this preview is for operator framing.
   root: { flex: 1, backgroundColor: 'transparent' },
-  rec: { position: 'absolute', top: 56, right: 18, color: COLORS.danger, fontSize: 13, fontWeight: '800' },
-  progress: {
+  topBar: {
     position: 'absolute',
-    top: 56,
+    top: 0,
     left: 0,
     right: 0,
-    textAlign: 'center',
-    color: COLORS.subtle,
-    fontSize: 13,
-    fontWeight: '600',
+    paddingHorizontal: 18,
+    paddingBottom: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: 'rgba(0,0,0,0.45)',
   },
-  footer: { position: 'absolute', bottom: 48, left: 0, right: 0, alignItems: 'center' },
-  phase: { color: COLORS.faint, fontSize: 12, letterSpacing: 1, textTransform: 'uppercase' },
-  countdown: { color: COLORS.subtle, fontSize: 28, fontWeight: '700', marginTop: 4 },
-  exit: {
+  rec: { color: COLORS.danger, fontSize: 13, fontWeight: '800', width: 70 },
+  repLabel: { color: COLORS.text, fontSize: 15, fontWeight: '700' },
+  badge: { width: 70, alignItems: 'flex-end' },
+  badgeText: {
+    color: COLORS.accent2,
+    fontSize: 12,
+    fontWeight: '700',
+    borderWidth: 1,
+    borderColor: COLORS.accent2,
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    overflow: 'hidden',
+  },
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 },
+  arrow: { color: COLORS.accent2, fontSize: 96, fontWeight: '900' },
+  title: { color: COLORS.text, fontSize: 30, fontWeight: '800', textAlign: 'center', marginTop: 8 },
+  countdown: { color: COLORS.subtle, fontSize: 40, fontWeight: '700', marginTop: 12, fontVariant: ['tabular-nums'] },
+  bottom: {
     position: 'absolute',
-    top: 44,
-    left: 12,
-    width: MIN_TAP,
-    height: MIN_TAP,
+    bottom: 0,
+    left: 0,
+    right: 0,
+    paddingHorizontal: 18,
+    paddingTop: 14,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    gap: 10,
+  },
+  hint: { color: COLORS.subtle, fontSize: 13, textAlign: 'center', lineHeight: 19 },
+  endBtn: {
+    minHeight: 52,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.danger,
+    backgroundColor: 'rgba(229,72,77,0.18)',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  exitText: { color: COLORS.faint, fontSize: 20 },
+  endText: { color: COLORS.danger, fontSize: 16, fontWeight: '800' },
 });

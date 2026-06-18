@@ -13,24 +13,24 @@ import { COLORS, MIN_TAP } from '@/lib/theme';
 import { persistRun } from '@/lib/storage';
 import { PLRRunner } from '@/components/PLRRunner';
 import { GazeRunner } from '@/components/GazeRunner';
+import { setTorchLevel, turnOffTorch } from '@/modules/torch-level';
 import { PROTOCOL_LABEL, type AnyTrial, type Protocol, type Run } from '@/lib/types';
 
 type Stage = 'intro' | 'running' | 'between' | 'done';
 
 const RECORD_OPTS: CameraRecordingOptions = { maxDuration: 600 };
 
-// The full session runs all three protocols back-to-back, in this order.
-const SEQUENCE: Protocol[] = ['PLR', 'horizontal_gaze', 'vertical_gaze'];
+// PLR flash brightness, 0.0–1.0 (iOS torch level). Adjust for the desired
+// stimulus intensity; 1.0 is the brightest the device supports.
+const PLR_TORCH_LEVEL = 1.0;
+
+// The session runs both protocols back-to-back, in this order.
+const SEQUENCE: Protocol[] = ['PLR', 'horizontal_gaze'];
 
 // Renders the active stimulus runner for a protocol.
 const RUNNERS: Record<Protocol, (onDone: (t: AnyTrial[], c: boolean) => void, setTorch: (on: boolean) => void) => ReactNode> = {
   PLR: (onDone, setTorch) => <PLRRunner onDone={onDone} setTorch={setTorch} />,
-  horizontal_gaze: (onDone) => (
-    <GazeRunner protocolLabel="Horizontal Gaze" axis="x" directions={['right', 'left']} onDone={onDone} />
-  ),
-  vertical_gaze: (onDone) => (
-    <GazeRunner protocolLabel="Vertical Gaze" axis="y" directions={['up', 'down']} onDone={onDone} />
-  ),
+  horizontal_gaze: (onDone) => <GazeRunner onDone={onDone} />,
 };
 
 function durationMs(trials: AnyTrial[]): number {
@@ -47,7 +47,12 @@ export function SessionFlow() {
   const [index, setIndex] = useState(0); // which protocol in SEQUENCE
   const [runKey, setRunKey] = useState(0); // bump to remount runner + camera per protocol
   const [completed, setCompleted] = useState<Run[]>([]); // finished runs this session
-  const [torch, setTorch] = useState(false); // PLR runner controls torch
+
+  // PLR runner toggles the torch; drive it at a controlled brightness via the
+  // native TorchLevel module (expo-camera only supports boolean on/off).
+  const setTorch = (on: boolean) => {
+    (on ? setTorchLevel(PLR_TORCH_LEVEL) : turnOffTorch()).catch(() => {});
+  };
 
   const sessionId = useRef('');
   const sessionStartedAt = useRef('');
@@ -62,6 +67,7 @@ export function SessionFlow() {
   const recording = useRef(false);
   const recordPromise = useRef<Promise<{ uri: string } | undefined> | null>(null);
   const videoStartedAt = useRef<string | null>(null);
+  const videoStoppedAt = useRef<string | null>(null);
 
   // Start recording AFTER onCameraReady — iOS often still reports "Camera is not
   // ready yet" if recordAsync is called immediately, so delay + retry.
@@ -95,6 +101,7 @@ export function SessionFlow() {
 
   const stopRecording = async (): Promise<string | null> => {
     if (!recording.current) return null;
+    videoStoppedAt.current = new Date().toISOString(); // end of the video timeline
     try {
       cameraRef.current?.stopRecording();
       const r = await recordPromise.current;
@@ -131,6 +138,7 @@ export function SessionFlow() {
   const startProtocol = (i: number) => {
     startedAt.current = new Date().toISOString();
     videoStartedAt.current = null;
+    videoStoppedAt.current = null;
     recording.current = false;
     setIndex(i);
     setRunKey((k) => k + 1);
@@ -152,10 +160,17 @@ export function SessionFlow() {
       completed: didComplete,
       video_uri: null,
       video_started_at: videoStartedAt.current,
+      video_stopped_at: videoStoppedAt.current,
     };
 
     // AUTO-SAVE after each protocol — completion AND mid-protocol exit.
-    await persistRun(run, rawUri);
+    // persistRun never throws (data is saved to AsyncStorage even if file
+    // export fails); guard anyway so the flow always advances.
+    try {
+      await persistRun(run, rawUri);
+    } catch (e) {
+      Alert.alert('Save warning', `Could not fully save this test: ${String(e)}`);
+    }
     const done = [...completed, run];
     setCompleted(done);
 
@@ -182,7 +197,6 @@ export function SessionFlow() {
             facing="back"
             mode="video"
             active
-            enableTorch={torch}
             onCameraReady={startRecording}
             pointerEvents="none"
           />
@@ -255,7 +269,7 @@ export function SessionFlow() {
     );
   }
 
-  // Intro — one Pre-Session Setup for the whole 3-test session.
+  // Intro — one Pre-Session Setup for the whole 2-test session.
   const permLine = canRecord ? '✓ Camera & mic ready' : 'Camera & mic permission needed to record';
   return (
     <SafeAreaView style={styles.screen}>
@@ -265,15 +279,14 @@ export function SessionFlow() {
         </Pressable>
         <Text style={styles.bigTitle}>Pre-Session Setup</Text>
         <Text style={styles.instructions}>
-          One session runs all three tests back-to-back. After each test finishes you continue to the next.
+          One session runs both tests back-to-back. After each test finishes you continue to the next.
         </Text>
 
         <View style={styles.summaryCard}>
           {[
             { label: 'Test 1', value: 'PLR (flashlight)' },
-            { label: 'Test 2', value: 'Horizontal gaze' },
-            { label: 'Test 3', value: 'Vertical gaze' },
-            { label: 'Recording', value: 'Back camera · eye mount', highlight: true },
+            { label: 'Test 2', value: 'Horizontal gaze (finger)' },
+            { label: 'Recording', value: 'Rear camera · one eye', highlight: true },
           ].map((row, i, arr) => (
             <View key={i} style={[styles.summaryRow, i < arr.length - 1 && styles.summaryRowDivider]}>
               <Text style={styles.summaryLabel}>{row.label}</Text>
@@ -285,11 +298,11 @@ export function SessionFlow() {
         <Text style={styles.sectionLabel}>CHECKLIST</Text>
         <View style={styles.steps}>
           {[
-            'Fit the phone into the eye attachment so the BACK camera sits right against your eye.',
-            'You will not see the screen — follow the SPOKEN directions.',
-            'PLR: Keep your eyes open and looking into the camera. A flashlight will flash.',
-            'Gaze: keep your HEAD still and move only your EYES as guided.',
-            'All three tests record automatically and save as one grouped session.',
+            'PLR: fit the phone into the eye attachment so the REAR camera sits against the eye. A flashlight will flash — keep the eye open and looking into the camera.',
+            'Horizontal gaze: hold the phone so the REAR camera frames ONE eye. The screen faces you (the examiner).',
+            'Keep the HEAD still. The participant follows your raised finger with their eyes only.',
+            'Follow the on-screen prompts and move your finger left/right at the pace shown.',
+            'Both tests record automatically and save as one grouped session.',
           ].map((s, i) => (
             <View key={i} style={styles.stepRow}>
               <Text style={styles.stepNum}>{String(i + 1).padStart(2, '0')}</Text>

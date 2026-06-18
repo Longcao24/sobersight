@@ -10,7 +10,11 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.ESC.sobersight"
+      "bundleIdentifier": "com.ESC.sobersight",
+      "infoPlist": {
+        "UIFileSharingEnabled": true,
+        "LSSupportsOpeningDocumentsInPlace": true
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -48,7 +52,13 @@
           "recordAudioAndroid": true
         }
       ],
-      "expo-video"
+      "expo-video",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Sober Sight records your spoken voice commands during the in-vehicle task."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,
