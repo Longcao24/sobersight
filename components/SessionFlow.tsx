@@ -43,6 +43,7 @@ function durationMs(trials: AnyTrial[]): number {
 export function SessionFlow() {
   const router = useRouter();
   const [stage, setStage] = useState<Stage>('intro');
+  const [participantId, setParticipantId] = useState('');
   const [tag, setTag] = useState('');
   const [index, setIndex] = useState(0); // which protocol in SEQUENCE
   const [runKey, setRunKey] = useState(0); // bump to remount runner + camera per protocol
@@ -128,6 +129,11 @@ export function SessionFlow() {
 
   // Begin the whole session at the first protocol.
   const beginSession = () => {
+    const participant = participantId.trim();
+    if (!participant) {
+      Alert.alert('Participant ID required', 'Enter a participant ID before starting the session.');
+      return;
+    }
     sessionId.current = Crypto.randomUUID();
     sessionStartedAt.current = new Date().toISOString();
     setCompleted([]);
@@ -153,6 +159,7 @@ export function SessionFlow() {
       session_id: sessionId.current,
       session_index: index,
       session_started_at: sessionStartedAt.current,
+      participant_id: participantId.trim(),
       protocol,
       timestamp: startedAt.current,
       tag: tag.trim(),
@@ -240,7 +247,7 @@ export function SessionFlow() {
         <ScrollView contentContainerStyle={styles.body}>
           <Text style={styles.title}>Session complete</Text>
           <Text style={[styles.progressLine, { color: COLORS.ok }]}>
-            ✓ {completed.length} test{completed.length === 1 ? '' : 's'} saved as one session
+            ✓ {completed.length} test{completed.length === 1 ? '' : 's'} saved for participant {participantId.trim()}
           </Text>
 
           {completed.map((r) => {
@@ -285,7 +292,7 @@ export function SessionFlow() {
         <View style={styles.summaryCard}>
           {[
             { label: 'Test 1', value: 'PLR (flashlight)' },
-            { label: 'Test 2', value: 'Horizontal gaze (finger)' },
+            { label: 'Test 2', value: 'Horizontal gaze (self-test)' },
             { label: 'Recording', value: 'Rear camera · one eye', highlight: true },
           ].map((row, i, arr) => (
             <View key={i} style={[styles.summaryRow, i < arr.length - 1 && styles.summaryRowDivider]}>
@@ -299,9 +306,9 @@ export function SessionFlow() {
         <View style={styles.steps}>
           {[
             'PLR: fit the phone into the eye attachment so the REAR camera sits against the eye. A flashlight will flash — keep the eye open and looking into the camera.',
-            'Horizontal gaze: hold the phone so the REAR camera frames ONE eye. The screen faces you (the examiner).',
-            'Keep the HEAD still. The participant follows your raised finger with their eyes only.',
-            'Follow the on-screen prompts and move your finger left/right at the pace shown.',
+            'Horizontal gaze: hold the phone with the rear-camera attachment recording ONE eye.',
+            'Use your free hand as the target: extend your arm, make a fist, and raise one finger for the other eye to follow.',
+            'Start at center. Move your finger center → right over 3s, hold 1s, return center, move center → left over 3s, hold 1s, return center. Repeat 3 times.',
             'Both tests record automatically and save as one grouped session.',
           ].map((s, i) => (
             <View key={i} style={styles.stepRow}>
@@ -312,6 +319,18 @@ export function SessionFlow() {
         </View>
 
         <Text style={[styles.permLine, { color: canRecord ? COLORS.ok : COLORS.subtle }]}>{permLine}</Text>
+
+        <Text style={styles.fieldLabel}>Participant ID</Text>
+        <TextInput
+          style={styles.input}
+          value={participantId}
+          onChangeText={setParticipantId}
+          placeholder="e.g. P001"
+          placeholderTextColor={COLORS.faint}
+          autoCapitalize="characters"
+          autoCorrect={false}
+          returnKeyType="next"
+        />
 
         <Text style={styles.fieldLabel}>Tag / note (optional)</Text>
         <TextInput

@@ -12,7 +12,7 @@ function fmt(iso: string): string {
 }
 
 // Group runs into sessions (newest first), ordered protocols within each.
-function groupSessions(runs: Run[]): { sessionId: string; startedAt: string; tag: string; runs: Run[] }[] {
+function groupSessions(runs: Run[]): { sessionId: string; startedAt: string; participantId?: string; tag: string; runs: Run[] }[] {
   const map = new Map<string, Run[]>();
   for (const r of runs) {
     const key = r.session_id || r.run_id; // legacy runs have no session_id
@@ -25,6 +25,7 @@ function groupSessions(runs: Run[]): { sessionId: string; startedAt: string; tag
       return {
         sessionId,
         startedAt: ordered[0].session_started_at || ordered[0].timestamp,
+        participantId: ordered[0].participant_id,
         tag: ordered[0].tag,
         runs: ordered,
       };
@@ -56,7 +57,7 @@ export default function Home() {
         </Pressable>
 
         <Pressable style={styles.voiceBtn} onPress={() => router.push('/voice' as any)}>
-          <Text style={styles.voiceBtnText}>Voice Command Task</Text>
+          <Text style={styles.voiceBtnText}>Start In-Vehicle Voice Command Task</Text>
           <Text style={styles.voiceBtnSub}>10 rounds · in-vehicle spoken commands</Text>
         </Pressable>
 
@@ -70,7 +71,7 @@ export default function Home() {
         {sessions.map((s) => (
           <View key={s.sessionId} style={styles.group}>
             <Text style={styles.groupTitle}>
-              {fmt(s.startedAt)}{s.tag ? ` · ${s.tag}` : ''}
+              {fmt(s.startedAt)}{s.participantId ? ` · Participant ${s.participantId}` : ''}{s.tag ? ` · ${s.tag}` : ''}
             </Text>
             {s.runs.map((r) => (
               <View key={r.run_id} style={styles.row}>

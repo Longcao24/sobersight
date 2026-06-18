@@ -13,16 +13,17 @@ export interface PLRTrial {
   end_time: string | null; // ISO8601
 }
 
-// --- Horizontal gaze (examiner finger-tracking) ---
-// Examiner moves a raised finger; participant follows with their eyes while the
-// rear camera records one eye. One GazeTrial per movement phase. Phase names
+// --- Horizontal gaze (self-test finger target) ---
+// The participant holds the phone with the rear-camera attachment recording one
+// eye while the other eye follows their own raised finger target. One GazeTrial
+// per movement phase. Phase names
 // encode the side, so no separate direction field is needed.
 //   center             — finger held at center (lead-in, once)
 //   move_right         — center → participant's right (3s)
-//   hold_right         — held on the right (1s)
+//   hold_right         — finger held on the right (1s)
 //   center_from_right  — right → center
-//   move_left          — center → participant's left (3s)
-//   hold_left          — held on the left (1s)
+//   move_left          — center → participant's left, almost out of view (3s)
+//   hold_left          — finger held on the left (1s)
 //   center_from_left   — left → center
 export type GazePhase =
   | 'center'
@@ -47,6 +48,7 @@ export interface Run {
   session_id: string; // groups the protocols run back-to-back in one session
   session_index: number; // order within the session (0 = first protocol)
   session_started_at: string; // ISO8601 — when the whole session began
+  participant_id: string; // entered once per session, shared by both protocols
   protocol: Protocol;
   timestamp: string; // ISO8601 — when this protocol run started
   tag: string;

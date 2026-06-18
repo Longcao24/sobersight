@@ -29,6 +29,7 @@ function buildSessionJson(run: Run, videoPath: string | null, audiogramPath: str
   const isPLR = run.protocol === 'PLR';
   return {
     id: `session_${ms(endIso)}`,
+    participant_id: run.participant_id,
     protocol: run.protocol,
     soundMode: null,
     selectedSound: null,
@@ -54,6 +55,7 @@ function buildGazeRawJson(run: Run, videoPath: string | null) {
   const rel = (iso: string) => ms(iso) - base;
   return {
     protocol: run.protocol,
+    participant_id: run.participant_id,
     tag: run.tag,
     completed: run.completed,
     video_path: videoPath,

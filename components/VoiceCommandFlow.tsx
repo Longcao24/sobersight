@@ -10,6 +10,7 @@ import {
   setAudioModeAsync,
   useAudioRecorder,
 } from 'expo-audio';
+import { File } from 'expo-file-system';
 import { COLORS, MIN_TAP } from '@/lib/theme';
 import {
   GROUP_IMAGE,
@@ -19,12 +20,24 @@ import {
   tasksForGroup,
   type VoiceTask,
 } from '@/lib/voiceTasks';
-import { copyRoundAudio, persistVoiceSession } from '@/lib/voiceStorage';
-import type { VoiceRoundLog, VoiceSession } from '@/lib/voiceTypes';
+import { validateVoiceSessionProcedure } from '@/lib/voiceProcedure';
+import { copySessionAudio, persistVoiceSession, voiceSessionJsonPath } from '@/lib/voiceStorage';
+import type { VoiceRecordingState, VoiceRoundLog, VoiceSession, VoiceTransitionDirection } from '@/lib/voiceTypes';
 
 type Stage = 'setup' | 'roundIntro' | 'task' | 'done';
 
 const nowISO = () => new Date().toISOString();
+const relAudioMs = (session: VoiceSession | null, timestamp: string): number | null =>
+  session?.audioStartedAt ? Math.max(0, new Date(timestamp).getTime() - new Date(session.audioStartedAt).getTime()) : null;
+
+const audioFileExists = (uri: string | null): boolean => {
+  if (!uri) return false;
+  try {
+    return new File(uri).exists;
+  } catch {
+    return false;
+  }
+};
 
 export function VoiceCommandFlow() {
   const router = useRouter();
@@ -40,6 +53,7 @@ export function VoiceCommandFlow() {
 
   const sessionRef = useRef<VoiceSession | null>(null);
   const sequence = sessionRef.current?.group_sequence ?? [];
+  const currentRecordingState = (): VoiceRecordingState => (recording ? 'recording' : 'not_recording');
 
   // ---- permissions ----
   const requestMic = async () => {
@@ -54,22 +68,48 @@ export function VoiceCommandFlow() {
   };
 
   // ---- session lifecycle ----
-  const beginSession = () => {
+  const beginSession = async () => {
     const participant = parseInt(participantText.trim(), 10);
     if (!Number.isInteger(participant) || participant < 1) {
       Alert.alert('Participant number', 'Enter a whole participant number (1 or greater).');
       return;
     }
-    sessionRef.current = {
+
+    const status = await AudioModule.requestRecordingPermissionsAsync();
+    setMicGranted(status.granted);
+    if (!status.granted) {
+      Alert.alert('Microphone needed', 'Microphone access is required. The task cannot start without audio recording.');
+      return;
+    }
+
+    const session: VoiceSession = {
       kind: 'voice_command',
       session_id: Crypto.randomUUID(),
       participant,
       group_sequence: groupSequenceFor(participant),
       started_at: nowISO(),
       ended_at: null,
+      audioStartedAt: null,
+      audioStoppedAt: null,
+      audioUri: null,
+      jsonUri: null,
       completed: false,
       rounds: [],
     };
+
+    try {
+      await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+      await recorder.prepareToRecordAsync();
+      recorder.record();
+      session.audioStartedAt = nowISO();
+      setRecording(true);
+    } catch (e) {
+      setRecording(false);
+      Alert.alert('Recording problem', `Could not start the microphone: ${String(e)}. The task cannot continue without audio.`);
+      return;
+    }
+
+    sessionRef.current = session;
     setRoundIdx(0);
     setStage('roundIntro');
   };
@@ -77,12 +117,71 @@ export function VoiceCommandFlow() {
   const currentRoundTasks = (): VoiceTask[] => tasksForGroup(sequence[roundIdx]);
 
   const stampShown = (rIdx: number, tIdx: number) => {
-    const log = sessionRef.current?.rounds[rIdx]?.tasks[tIdx];
-    if (log && !log.shownAt) log.shownAt = nowISO();
+    const session = sessionRef.current;
+    const round = session?.rounds[rIdx];
+    const log = round?.tasks[tIdx];
+    if (!round || !log) return;
+    const shownAt = nowISO();
+    const shownAtAudioMs = relAudioMs(session, shownAt);
+    const recordingState = currentRecordingState();
+    if (!log.shownAt) {
+      log.shownAt = shownAt;
+      log.shownAtAudioMs = shownAtAudioMs;
+    }
+    log.visits.push({ shownAt, leftAt: null, shownAtAudioMs, leftAtAudioMs: null, leaveDirection: null, recordingState });
+    round.pageEvents.push({
+      event: 'shown',
+      timestamp: shownAt,
+      audioMs: shownAtAudioMs,
+      participant: session.participant,
+      groupSequence: [...session.group_sequence],
+      round: log.round,
+      group: log.group,
+      groupId: log.groupId,
+      taskCode: log.taskCode,
+      taskId: log.taskId,
+      taskIndex: log.taskIndex,
+      type: log.type,
+      sceneId: log.sceneId,
+      imageAsset: log.imageAsset,
+      transitionDirection: null,
+      recordingState,
+    });
   };
-  const stampLeft = (rIdx: number, tIdx: number) => {
-    const log = sessionRef.current?.rounds[rIdx]?.tasks[tIdx];
-    if (log) log.leftAt = nowISO();
+  const stampLeft = (rIdx: number, tIdx: number, direction: VoiceTransitionDirection) => {
+    const session = sessionRef.current;
+    const round = session?.rounds[rIdx];
+    const log = round?.tasks[tIdx];
+    if (!round || !log) return;
+    const openVisit = [...log.visits].reverse().find((visit) => visit.leftAt === null);
+    if (!openVisit) return;
+    const leftAt = nowISO();
+    const leftAtAudioMs = relAudioMs(session, leftAt);
+    const recordingState = currentRecordingState();
+    log.leftAt = leftAt;
+    log.leftAtAudioMs = leftAtAudioMs;
+    openVisit.leftAt = leftAt;
+    openVisit.leftAtAudioMs = leftAtAudioMs;
+    openVisit.leaveDirection = direction;
+    openVisit.recordingState = recordingState;
+    round.pageEvents.push({
+      event: 'left',
+      timestamp: leftAt,
+      audioMs: leftAtAudioMs,
+      participant: session.participant,
+      groupSequence: [...session.group_sequence],
+      round: log.round,
+      group: log.group,
+      groupId: log.groupId,
+      taskCode: log.taskCode,
+      taskId: log.taskId,
+      taskIndex: log.taskIndex,
+      type: log.type,
+      sceneId: log.sceneId,
+      imageAsset: log.imageAsset,
+      transitionDirection: direction,
+      recordingState,
+    });
   };
 
   const startRound = async (rIdx: number) => {
@@ -93,23 +192,30 @@ export function VoiceCommandFlow() {
     const roundLog: VoiceRoundLog = {
       round: rIdx + 1,
       group,
-      audioStartedAt: null,
+      groupId: `G${group}`,
+      audioStartedAt: session.audioStartedAt,
       audioStoppedAt: null,
       audioUri: null,
-      tasks: tasks.map((t) => ({ taskCode: t.taskCode, type: t.type, shownAt: '', leftAt: null })),
+      pageEvents: [],
+      tasks: tasks.map((t, i) => ({
+        taskCode: t.taskCode,
+        taskId: t.taskCode,
+        group: t.group,
+        groupId: t.groupId,
+        round: rIdx + 1,
+        taskIndex: i + 1,
+        type: t.type,
+        sceneId: t.sceneId,
+        imageAsset: t.imageAsset,
+        promptLines: t.promptLines,
+        shownAt: '',
+        leftAt: null,
+        shownAtAudioMs: null,
+        leftAtAudioMs: null,
+        visits: [],
+      })),
     };
     session.rounds[rIdx] = roundLog;
-
-    try {
-      await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
-      await recorder.prepareToRecordAsync();
-      recorder.record();
-      roundLog.audioStartedAt = nowISO();
-      setRecording(true);
-    } catch (e) {
-      setRecording(false);
-      Alert.alert('Recording problem', `Could not start the microphone: ${String(e)}. The round will continue without audio.`);
-    }
 
     setRoundIdx(rIdx);
     setTaskIdx(0);
@@ -117,15 +223,8 @@ export function VoiceCommandFlow() {
     setStage('task');
   };
 
-  // Stop recording, copy audio, checkpoint, then advance to the next round (or
-  // finish). `complete` is true only when all rounds are done.
-  const finishRound = async (early: boolean) => {
-    const session = sessionRef.current;
-    if (!session) return;
-    const rIdx = roundIdx;
-    stampLeft(rIdx, taskIdx);
-
-    const roundLog = session.rounds[rIdx];
+  const stopSessionRecording = async (session: VoiceSession) => {
+    if (!recording) return;
     let uri: string | null = null;
     try {
       await recorder.stop();
@@ -133,16 +232,37 @@ export function VoiceCommandFlow() {
     } catch {
       // keep whatever the recorder produced
     }
+    session.audioStoppedAt = nowISO();
     setRecording(false);
-    if (roundLog) {
-      roundLog.audioStoppedAt = nowISO();
-      if (uri) roundLog.audioUri = copyRoundAudio(session, roundLog.round, roundLog.group, uri);
+    if (uri) session.audioUri = copySessionAudio(session, uri);
+    for (const round of session.rounds) {
+      round.audioStartedAt = session.audioStartedAt;
+      round.audioStoppedAt = session.audioStoppedAt;
+      round.audioUri = null;
     }
+  };
 
+  // Checkpoint after each round, then advance to the next round. The one session
+  // recording is stopped only when the whole test ends or the user exits early.
+  const finishRound = async (early: boolean) => {
+    const session = sessionRef.current;
+    if (!session) return;
+    const rIdx = roundIdx;
     const isLast = rIdx >= NUM_GROUPS - 1;
+    stampLeft(rIdx, taskIdx, early ? 'end_session' : 'end_round');
+
     if (early || isLast) {
-      session.completed = !early && isLast;
       session.ended_at = nowISO();
+      await stopSessionRecording(session);
+      if (!early && isLast) {
+        const result = validateVoiceSessionProcedure(session, { audioFileExists: audioFileExists(session.audioUri) });
+        session.completed = result.valid;
+        if (!result.valid) {
+          Alert.alert('Procedure incomplete', `Session saved as partial because validation failed:\n${result.errors.slice(0, 4).join('\n')}`);
+        }
+      } else {
+        session.completed = false;
+      }
     }
     try {
       await persistVoiceSession(session);
@@ -167,8 +287,8 @@ export function VoiceCommandFlow() {
 
   const goNext = () => {
     const rIdx = roundIdx;
-    stampLeft(rIdx, taskIdx);
     if (taskIdx < currentRoundTasks().length - 1) {
+      stampLeft(rIdx, taskIdx, 'next');
       const next = taskIdx + 1;
       setTaskIdx(next);
       stampShown(rIdx, next);
@@ -179,8 +299,10 @@ export function VoiceCommandFlow() {
 
   const goPrev = () => {
     if (taskIdx === 0) return;
-    stampLeft(roundIdx, taskIdx);
-    setTaskIdx(taskIdx - 1);
+    stampLeft(roundIdx, taskIdx, 'previous');
+    const prev = taskIdx - 1;
+    setTaskIdx(prev);
+    stampShown(roundIdx, prev);
   };
 
   // ============================== RENDER ==============================
@@ -195,7 +317,7 @@ export function VoiceCommandFlow() {
           {round === 1 && <Text style={styles.baseline}>Sober baseline</Text>}
           <Text style={styles.roundTitle}>5 voice commands</Text>
           <Text style={styles.roundSub}>
-            For each card: imagine you are driving, then say the command out loud. Audio records for the whole round.
+            For each card: imagine you are driving, then say the command out loud. One audio file records the whole test.
           </Text>
           <View style={styles.metaCard}>
             <Text style={styles.metaText}>Participant {sessionRef.current?.participant} · Group {group}</Text>
@@ -219,7 +341,7 @@ export function VoiceCommandFlow() {
       <SafeAreaView style={styles.screen}>
         <View style={styles.taskHeader}>
           <Text style={styles.crumb}>
-            Round {roundIdx + 1}/{NUM_GROUPS} · Task {taskIdx + 1}/{tasks.length}
+            Round {roundIdx + 1}/{NUM_GROUPS} · {t.groupId} · {t.taskCode} · Task {taskIdx + 1}/{tasks.length}
           </Text>
           <View style={styles.recPill}>
             <View style={[styles.recDot, !recording && styles.recDotOff]} />
@@ -259,16 +381,16 @@ export function VoiceCommandFlow() {
   if (stage === 'done') {
     const session = sessionRef.current;
     const doneRounds = session?.rounds.length ?? 0;
-    const withAudio = session?.rounds.filter((r) => r.audioUri).length ?? 0;
     return (
       <SafeAreaView style={styles.screen}>
         <ScrollView contentContainerStyle={styles.centerBody}>
           <Text style={styles.checkmark}>✓</Text>
           <Text style={styles.roundTitle}>{session?.completed ? 'Session complete' : 'Session ended'}</Text>
           <Text style={styles.roundSub}>
-            Participant {session?.participant} · {doneRounds} round{doneRounds === 1 ? '' : 's'} recorded · {withAudio} with audio
+            Participant {session?.participant} · {doneRounds} round{doneRounds === 1 ? '' : 's'} logged · {session?.audioUri ? '1 audio file' : 'no audio'}
           </Text>
           <Text style={styles.seqLine}>Group order: {session?.group_sequence.join(', ')}</Text>
+          {!!session && <Text style={styles.seqLine}>JSON: {voiceSessionJsonPath(session)}</Text>}
           <Pressable style={styles.primary} onPress={() => router.replace('/' as any)}>
             <Text style={styles.primaryText}>Done</Text>
           </Pressable>
@@ -286,7 +408,7 @@ export function VoiceCommandFlow() {
         <Pressable style={styles.backLink} onPress={() => router.back()} hitSlop={10}>
           <Text style={styles.backLinkText}>‹ Back</Text>
         </Pressable>
-        <Text style={styles.bigTitle}>Voice Command Task</Text>
+        <Text style={styles.bigTitle}>In-Vehicle Voice Command Task</Text>
         <Text style={styles.roundSub}>
           {NUM_GROUPS} rounds · 5 spoken commands per round. The group order rotates per participant; round 1 is the
           sober baseline.
@@ -355,7 +477,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
     paddingVertical: 10,
   },
-  crumb: { color: COLORS.subtle, fontSize: 13, fontWeight: '600' },
+  crumb: { flex: 1, color: COLORS.subtle, fontSize: 13, fontWeight: '600', paddingRight: 8 },
   recPill: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   recDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: COLORS.danger },
   recDotOff: { backgroundColor: COLORS.faint },

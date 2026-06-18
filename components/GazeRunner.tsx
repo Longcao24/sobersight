@@ -6,9 +6,9 @@ import * as Speech from 'expo-speech';
 import { COLORS } from '@/lib/theme';
 import type { GazePhase, GazeTrial } from '@/lib/types';
 
-// Examiner-guided horizontal gaze. The EXAMINER reads these on-screen cues and
-// moves a raised finger; the participant follows the finger with their eyes
-// while the rear camera records one eye. Raw data collection only — no scoring.
+// Self-test horizontal gaze. The participant holds the phone with the
+// rear-camera attachment recording one eye while the other eye follows their
+// own raised finger target. Raw data collection only — no scoring.
 //
 // Movement sequence (repeated REPS times):
 //   center → move RIGHT (3s) → hold RIGHT (1s) → back to center (3s)
@@ -19,6 +19,7 @@ import type { GazePhase, GazeTrial } from '@/lib/types';
 const MOVE_MS = 3000;
 const HOLD_MS = 1000;
 const LEAD_IN_MS = 3000; // initial center hold before the first movement
+const SETUP_MAX_MS = 30000; // safety cap for spoken setup before timed sequence
 const REPS = 3;
 
 const nowISO = () => new Date().toISOString();
@@ -27,21 +28,67 @@ const nowISO = () => new Date().toISOString();
 interface PhaseDef {
   phase: GazePhase;
   ms: number;
-  title: string; // big examiner instruction
+  title: string; // big self-test instruction
+  detail: string;
   voice: string; // spoken cue
   arrow: '◀' | '▶' | '●';
 }
 
 function repPhases(): PhaseDef[] {
   return [
-    { phase: 'move_right', ms: MOVE_MS, title: "Move to participant's RIGHT", voice: "Move your finger slowly to the participant's right.", arrow: '▶' },
-    { phase: 'hold_right', ms: HOLD_MS, title: 'Hold RIGHT', voice: 'Hold.', arrow: '▶' },
-    { phase: 'center_from_right', ms: MOVE_MS, title: 'Back to CENTER', voice: 'Move back to center.', arrow: '●' },
-    { phase: 'move_left', ms: MOVE_MS, title: "Move to participant's LEFT", voice: "Move your finger slowly to the participant's left.", arrow: '◀' },
-    { phase: 'hold_left', ms: HOLD_MS, title: 'Hold LEFT', voice: 'Hold.', arrow: '◀' },
-    { phase: 'center_from_left', ms: MOVE_MS, title: 'Back to CENTER', voice: 'Move back to center.', arrow: '●' },
+    {
+      phase: 'move_right',
+      ms: MOVE_MS,
+      title: 'Move target RIGHT',
+      detail: 'Move your raised finger from center to your right over 3 seconds.',
+      voice: 'Move your finger from center to your right side over three seconds.',
+      arrow: '▶',
+    },
+    {
+      phase: 'hold_right',
+      ms: HOLD_MS,
+      title: 'Hold RIGHT',
+      detail: 'Hold your finger still on the right side.',
+      voice: 'Hold on the right side.',
+      arrow: '▶',
+    },
+    {
+      phase: 'center_from_right',
+      ms: MOVE_MS,
+      title: 'Return to CENTER',
+      detail: 'Move your finger smoothly back to center.',
+      voice: 'Move your finger back to center.',
+      arrow: '●',
+    },
+    {
+      phase: 'move_left',
+      ms: MOVE_MS,
+      title: 'Move target LEFT',
+      detail: 'Move your raised finger from center to your left, almost out of view.',
+      voice: 'Move your finger slowly from center to your left side, almost out of visible range.',
+      arrow: '◀',
+    },
+    {
+      phase: 'hold_left',
+      ms: HOLD_MS,
+      title: 'Hold LEFT',
+      detail: 'Hold your finger still on the left side.',
+      voice: 'Hold on the left side.',
+      arrow: '◀',
+    },
+    {
+      phase: 'center_from_left',
+      ms: MOVE_MS,
+      title: 'Return to CENTER',
+      detail: 'Move your finger smoothly back to center.',
+      voice: 'Move your finger back to center.',
+      arrow: '●',
+    },
   ];
 }
+
+const SETUP_VOICE =
+  'Horizontal gaze setup. Hold the phone so the rear camera attachment records one eye. Keep your head still. Use your other eye to look at your own finger. With your free hand, extend your arm straight out in front of you, make a fist, and raise only one finger as the target. Start with your finger at the center position.';
 
 interface Props {
   onDone: (trials: GazeTrial[], completed: boolean) => void;
@@ -51,6 +98,7 @@ export function GazeRunner({ onDone }: Props) {
   const insets = useSafeAreaInsets();
 
   const [title, setTitle] = useState('Get ready');
+  const [detail, setDetail] = useState('');
   const [arrow, setArrow] = useState<'◀' | '▶' | '●'>('●');
   const [repLabel, setRepLabel] = useState('');
   const [remaining, setRemaining] = useState(0); // seconds, display only
@@ -67,6 +115,16 @@ export function GazeRunner({ onDone }: Props) {
       timers.current.push({ cancel: () => { clearTimeout(id); resolve(); } });
     });
 
+  const speakAsync = (text: string, rate = 0.95) =>
+    new Promise<void>((resolve) => {
+      Speech.speak(text, {
+        rate,
+        onDone: () => resolve(),
+        onStopped: () => resolve(),
+        onError: () => resolve(),
+      });
+    });
+
   const finish = (completed: boolean) => {
     if (doneGuard.current) return;
     doneGuard.current = true;
@@ -79,12 +137,22 @@ export function GazeRunner({ onDone }: Props) {
     timers.current.forEach((t) => t.cancel());
   };
 
+  const runSetup = async () => {
+    setTitle('Gaze setup');
+    setDetail('Hold the phone to record one eye. Use your free hand as the finger target for the other eye.');
+    setArrow('●');
+    deadline.current = Date.now() + SETUP_MAX_MS;
+    await Promise.race([speakAsync(SETUP_VOICE, 0.9), sleep(SETUP_MAX_MS)]);
+    deadline.current = 0;
+  };
+
   // Run one timed phase: log its start/end and drive the on-screen guide.
   const runPhase = async (def: PhaseDef, rep: number, countdown: boolean) => {
     const trial: GazeTrial = { phase: def.phase, rep, start_time: nowISO(), end_time: null };
     trialsRef.current.push(trial);
 
     setTitle(def.title);
+    setDetail(def.detail);
     setArrow(def.arrow);
     Haptics.impactAsync(
       def.arrow === '●' ? Haptics.ImpactFeedbackStyle.Light : Haptics.ImpactFeedbackStyle.Heavy,
@@ -107,12 +175,25 @@ export function GazeRunner({ onDone }: Props) {
 
   // Phase sequence runner.
   useEffect(() => {
+    const activeTimers = timers.current;
+
     (async () => {
-      // Lead-in center hold — recording is already rolling; gets the finger and
-      // the participant's eyes centered before the first movement.
+      setRepLabel('Setup');
+      await runSetup();
+      if (cancelled.current) return finish(false);
+
+      // Lead-in center hold — recording is already rolling before the first
+      // movement cue.
       setRepLabel('Setup');
       await runPhase(
-        { phase: 'center', ms: LEAD_IN_MS, title: 'Hold finger at CENTER', voice: "Hold your finger at the center and have the participant look at it.", arrow: '●' },
+        {
+          phase: 'center',
+          ms: LEAD_IN_MS,
+          title: 'Start at CENTER',
+          detail: 'Hold your raised finger at center in front of you.',
+          voice: 'Start at the center position in front of you.',
+          arrow: '●',
+        },
         0,
         true,
       );
@@ -130,7 +211,7 @@ export function GazeRunner({ onDone }: Props) {
 
     return () => {
       cancelled.current = true;
-      timers.current.forEach((t) => t.cancel());
+      activeTimers.forEach((t) => t.cancel());
       Speech.stop();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -138,7 +219,7 @@ export function GazeRunner({ onDone }: Props) {
 
   return (
     <View style={styles.root}>
-      {/* Top bar — operator-facing (rear camera points at the participant's eye) */}
+      {/* Top bar */}
       <View style={[styles.topBar, { paddingTop: insets.top + 6 }]} pointerEvents="none">
         <Text style={styles.rec}>● REC</Text>
         <Text style={styles.repLabel}>{repLabel}</Text>
@@ -148,12 +229,13 @@ export function GazeRunner({ onDone }: Props) {
       <View style={styles.center} pointerEvents="none">
         <Text style={styles.arrow}>{arrow}</Text>
         <Text style={styles.title}>{title}</Text>
+        {!!detail && <Text style={styles.detail}>{detail}</Text>}
         {remaining > 0 && <Text style={styles.countdown}>{remaining}</Text>}
       </View>
 
       <View style={[styles.bottom, { paddingBottom: insets.bottom + 10 }]} pointerEvents="box-none">
         <Text style={styles.hint} pointerEvents="none">
-          Keep the rear camera on one eye · participant follows your finger · head still
+          Keep head still · other eye follows your finger · 3 cycles
         </Text>
         <Pressable style={styles.endBtn} onLongPress={exit} delayLongPress={900}>
           <Text style={styles.endText}>■ Hold to End Session</Text>
@@ -194,6 +276,7 @@ const styles = StyleSheet.create({
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 },
   arrow: { color: COLORS.accent2, fontSize: 96, fontWeight: '900' },
   title: { color: COLORS.text, fontSize: 30, fontWeight: '800', textAlign: 'center', marginTop: 8 },
+  detail: { color: COLORS.subtle, fontSize: 16, lineHeight: 23, textAlign: 'center', marginTop: 10 },
   countdown: { color: COLORS.subtle, fontSize: 40, fontWeight: '700', marginTop: 12, fontVariant: ['tabular-nums'] },
   bottom: {
     position: 'absolute',

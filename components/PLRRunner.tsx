@@ -64,6 +64,8 @@ export function PLRRunner({ onDone, setTorch }: Props) {
   };
 
   useEffect(() => {
+    const activeTimers = timers.current;
+
     (async () => {
       await speakAsync('Keep your eyes open and look at the camera.');
       if (cancelled.current) return finish(false);
@@ -112,7 +114,7 @@ export function PLRRunner({ onDone, setTorch }: Props) {
 
     return () => {
       cancelled.current = true;
-      timers.current.forEach((t) => t.cancel());
+      activeTimers.forEach((t) => t.cancel());
       Speech.stop();
       setTorch(false);
     };
