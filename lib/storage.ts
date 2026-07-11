@@ -1,12 +1,46 @@
 // Local persistence + JSON export. Fully offline.
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Directory, File, Paths } from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
+import RNFS from 'react-native-fs';
+import { Platform } from 'react-native';
 import type { GazeTrial, PLRTrial, Run } from './types';
 import { buildEvents } from './events';
+import { PROTOCOL_LABEL } from './types';
 
 const KEY = 'sobersight_runs_v1';
+const ROOT_DIR = 'SoberSight';
+
+function getBaseUri(): string {
+  return Platform.OS === 'android' 
+    ? `${RNFS.ExternalStorageDirectoryPath}/Documents/${ROOT_DIR}`
+    : `${FileSystem.documentDirectory}${ROOT_DIR}`;
+}
+
+async function makeDirectory(path: string) {
+  if (Platform.OS === 'android') {
+    await RNFS.mkdir(path.replace('file://', ''));
+  } else {
+    await FileSystem.makeDirectoryAsync(path, { intermediates: true });
+  }
+}
+
+async function copyFile(from: string, to: string) {
+  if (Platform.OS === 'android') {
+    await RNFS.copyFile(from.replace('file://', ''), to.replace('file://', ''));
+  } else {
+    await FileSystem.copyAsync({ from, to });
+  }
+}
+
+async function writeString(path: string, contents: string) {
+  if (Platform.OS === 'android') {
+    await RNFS.writeFile(path.replace('file://', ''), contents, 'utf8');
+  } else {
+    await FileSystem.writeAsStringAsync(path, contents);
+  }
+}
 
 const ms = (iso: string) => new Date(iso).getTime();
 
@@ -73,36 +107,31 @@ function buildGazeRawJson(run: Run, videoPath: string | null) {
   };
 }
 
-// Persist a finished run to disk in a retrievable per-session folder:
-//   Documents/SoberSight/YYYY-MM-DD_HH-mm-ss/<protocol>/{session.json, video.<ext>}
-// Also copies the recorded video out of the cache and indexes the run in
-// AsyncStorage. Mutates run.video_uri to the permanent path. Returns the run.
+// Process and persist a run to disk and async storage.
 export async function persistRun(run: Run, rawVideoUri: string | null): Promise<Run> {
-  // Trial data is critical. Export the human-readable files to the visible
-  // Documents folder BEST-EFFORT, then ALWAYS index the run in AsyncStorage so
-  // a disk/file error can never lose the structured data. This function never
-  // throws — the caller can rely on the run being saved.
-  //
-  // One session = up to 3 protocols, grouped on disk under a single folder:
-  //   Documents/SoberSight/YYYY-MM-DD_HH-mm-ss/<protocol>/{session.json, video.<ext>}
-  // The folder stamp is the SESSION start so all protocols share one folder.
   try {
-    const base = new Directory(Paths.document, 'SoberSight');
-    if (!base.exists) base.create();
-    const sessionDir = new Directory(base, localStamp(run.session_started_at));
-    if (!sessionDir.exists) sessionDir.create();
-    const dir = new Directory(sessionDir, run.protocol);
-    if (!dir.exists) dir.create();
+    const baseUri = getBaseUri();
+    const pId = run.participant_id || 'Unassigned';
+    const protocolLabel = PROTOCOL_LABEL[run.protocol];
+    const sessionDirName = `${protocolLabel}_${localStamp(run.timestamp)}`;
+    const dirUri = `${baseUri}/${pId}/${sessionDirName}`;
+    
+    await makeDirectory(dirUri);
 
     let videoPath: string | null = null;
     if (rawVideoUri) {
       try {
         const ext = (rawVideoUri.split('.').pop() || 'mov').split('?')[0];
-        const vf = new File(dir, `video.${ext}`);
-        if (vf.exists) vf.delete();
-        new File(rawVideoUri).copy(vf);
-        run.video_uri = vf.uri;
-        videoPath = vf.uri;
+        const vfUri = `${dirUri}/video.${ext}`;
+        await copyFile(rawVideoUri, vfUri);
+        
+        // Attempt to clean up the cached recording if copy succeeds
+        try {
+          await FileSystem.deleteAsync(rawVideoUri, { idempotent: true });
+        } catch (e) {}
+
+        run.video_uri = vfUri;
+        videoPath = vfUri;
       } catch {
         run.video_uri = rawVideoUri; // fall back to the cache uri
         videoPath = rawVideoUri;
@@ -114,11 +143,10 @@ export async function persistRun(run: Run, rawVideoUri: string | null): Promise<
     const session =
       run.protocol === 'horizontal_gaze'
         ? buildGazeRawJson(run, videoPath)
-        : buildSessionJson(run, videoPath, dir.uri);
-    const jf = new File(dir, 'session.json');
-    if (jf.exists) jf.delete();
-    jf.create();
-    jf.write(JSON.stringify(session, null, 2));
+        : buildSessionJson(run, videoPath, dirUri);
+        
+    const jfUri = `${dirUri}/session.json`;
+    await writeString(jfUri, JSON.stringify(session, null, 2));
   } catch (e) {
     // Files unavailable — keep the cache video uri (if any) so it's still
     // playable, and fall through to the durable AsyncStorage save below.
@@ -165,17 +193,16 @@ export async function exportRuns(): Promise<string> {
   const json = JSON.stringify(runs, null, 2);
 
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const file = new File(Paths.cache, `sobersight_export_${stamp}.json`);
-  if (file.exists) file.delete();
-  file.create();
-  file.write(json);
+  const fileUri = `${FileSystem.cacheDirectory}sobersight_export_${stamp}.json`;
+  
+  await FileSystem.writeAsStringAsync(fileUri, json);
 
   if (await Sharing.isAvailableAsync()) {
-    await Sharing.shareAsync(file.uri, {
+    await Sharing.shareAsync(fileUri, {
       mimeType: 'application/json',
       UTI: 'public.json',
       dialogTitle: 'Export Sober Sight sessions',
     });
   }
-  return file.uri;
+  return fileUri;
 }

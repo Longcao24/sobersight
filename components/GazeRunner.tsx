@@ -3,103 +3,80 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
 import * as Speech from 'expo-speech';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import { COLORS } from '@/lib/theme';
-import type { GazePhase, GazeTrial } from '@/lib/types';
-
-// Self-test horizontal gaze. The participant holds the phone with the
-// rear-camera attachment recording one eye while the other eye follows their
-// own raised finger target. Raw data collection only — no scoring.
-//
-// Movement sequence (repeated REPS times):
-//   center → move RIGHT (3s) → hold RIGHT (1s) → back to center (3s)
-//          → move LEFT  (3s) → hold LEFT  (1s) → back to center (3s)
-// A lead-in center hold ensures recording is already running before the first
-// movement begins.
-
-const MOVE_MS = 3000;
-const HOLD_MS = 1000;
-const LEAD_IN_MS = 3000; // initial center hold before the first movement
-const SETUP_MAX_MS = 30000; // safety cap for spoken setup before timed sequence
-const REPS = 3;
+import type { GazeTrial } from '@/lib/types';
 
 const nowISO = () => new Date().toISOString();
 
-// One phase of the on-screen guide. `arrow` drives the big direction indicator.
 interface PhaseDef {
-  phase: GazePhase;
+  phase: string;
   ms: number;
-  title: string; // big self-test instruction
+  title: string;
   detail: string;
-  voice: string; // spoken cue
-  arrow: '◀' | '▶' | '●';
+  voice: string;
+  dotLayout?: 'left' | 'center' | 'right';
 }
 
-function repPhases(): PhaseDef[] {
+function getPhases(): PhaseDef[] {
   return [
     {
-      phase: 'move_right',
-      ms: MOVE_MS,
-      title: 'Move target RIGHT',
-      detail: 'Move your raised finger from center to your right over 3 seconds.',
-      voice: 'Move your finger from center to your right side over three seconds.',
-      arrow: '▶',
+      phase: 'right_eye_intro',
+      ms: 5000,
+      title: 'Right Eye Test',
+      detail: 'Please keep your head still and move only your eyes. The right eye test will begin now.',
+      voice: 'Please keep your head still and move only your eyes. The right eye test will begin now.',
     },
-    {
-      phase: 'hold_right',
-      ms: HOLD_MS,
-      title: 'Hold RIGHT',
-      detail: 'Hold your finger still on the right side.',
-      voice: 'Hold on the right side.',
-      arrow: '▶',
-    },
-    {
-      phase: 'center_from_right',
-      ms: MOVE_MS,
-      title: 'Return to CENTER',
-      detail: 'Move your finger smoothly back to center.',
-      voice: 'Move your finger back to center.',
-      arrow: '●',
-    },
-    {
-      phase: 'move_left',
-      ms: MOVE_MS,
-      title: 'Move target LEFT',
-      detail: 'Move your raised finger from center to your left, almost out of view.',
-      voice: 'Move your finger slowly from center to your left side, almost out of visible range.',
-      arrow: '◀',
-    },
-    {
-      phase: 'hold_left',
-      ms: HOLD_MS,
-      title: 'Hold LEFT',
-      detail: 'Hold your finger still on the left side.',
-      voice: 'Hold on the left side.',
-      arrow: '◀',
-    },
-    {
-      phase: 'center_from_left',
-      ms: MOVE_MS,
-      title: 'Return to CENTER',
-      detail: 'Move your finger smoothly back to center.',
-      voice: 'Move your finger back to center.',
-      arrow: '●',
-    },
+    // REP 1
+    { phase: 'right_left_dot_1', ms: 3000, title: 'Left Dot', detail: 'Look at the left dot.', voice: 'Look at the left dot.', dotLayout: 'left' },
+    { phase: 'right_center_dot_1', ms: 3000, title: 'Center Dot', detail: 'Now look up at the center dot.', voice: 'Now look up at the center dot.', dotLayout: 'center' },
+    { phase: 'right_right_dot_1', ms: 3000, title: 'Right Dot', detail: 'Now look at the right dot.', voice: 'Now look at the right dot.', dotLayout: 'right' },
+    { phase: 'right_inter_rep', ms: 3000, title: 'Great', detail: 'Repeat the sequence one more time.', voice: 'Great. Repeat the sequence one more time.' },
+    // REP 2
+    { phase: 'right_left_dot_2', ms: 3000, title: 'Left Dot', detail: 'Look at the left dot.', voice: 'Look at the left dot.', dotLayout: 'left' },
+    { phase: 'right_center_dot_2', ms: 3000, title: 'Center Dot', detail: 'Now look up at the center dot.', voice: 'Now look up at the center dot.', dotLayout: 'center' },
+    { phase: 'right_right_dot_2', ms: 3000, title: 'Right Dot', detail: 'Now look at the right dot.', voice: 'Now look at the right dot.', dotLayout: 'right' },
+    { phase: 'right_end', ms: 3000, title: 'Right Eye Complete', detail: 'The right eye test is complete.', voice: 'The right eye test is complete.' },
+    
+    // LEFT EYE
+    { phase: 'left_eye_intro', ms: 6000, title: 'Left Eye Test', detail: 'Now switch to your left eye. Keep your head still and move only your eyes. The left eye test will begin now.', voice: 'Now switch to your left eye. Keep your head still and move only your eyes. The left eye test will begin now.' },
+    // REP 1
+    { phase: 'left_right_dot_1', ms: 3000, title: 'Right Dot', detail: 'Look at the right dot.', voice: 'Look at the right dot.', dotLayout: 'right' },
+    { phase: 'left_center_dot_1', ms: 3000, title: 'Center Dot', detail: 'Now look up at the center dot.', voice: 'Now look up at the center dot.', dotLayout: 'center' },
+    { phase: 'left_left_dot_1', ms: 3000, title: 'Left Dot', detail: 'Now look at the left dot.', voice: 'Now look at the left dot.', dotLayout: 'left' },
+    { phase: 'left_inter_rep', ms: 3000, title: 'Great', detail: 'Repeat the sequence one more time.', voice: 'Great. Repeat the sequence one more time.' },
+    // REP 2
+    { phase: 'left_right_dot_2', ms: 3000, title: 'Right Dot', detail: 'Look at the right dot.', voice: 'Look at the right dot.', dotLayout: 'right' },
+    { phase: 'left_center_dot_2', ms: 3000, title: 'Center Dot', detail: 'Now look up at the center dot.', voice: 'Now look up at the center dot.', dotLayout: 'center' },
+    { phase: 'left_left_dot_2', ms: 3000, title: 'Left Dot', detail: 'Now look at the left dot.', voice: 'Now look at the left dot.', dotLayout: 'left' },
+    { phase: 'left_end', ms: 3000, title: 'Test Complete', detail: 'The left eye test is complete.', voice: 'The left eye test is complete.' },
   ];
 }
 
-const SETUP_VOICE =
-  'Horizontal gaze setup. Hold the phone so the rear camera attachment records one eye. Keep your head still. Use your other eye to look at your own finger. With your free hand, extend your arm straight out in front of you, make a fist, and raise only one finger as the target. Start with your finger at the center position.';
-
 interface Props {
   onDone: (trials: GazeTrial[], completed: boolean) => void;
+  setCameraActive?: (active: boolean) => void;
 }
 
-export function GazeRunner({ onDone }: Props) {
+export function GazeRunner({ onDone, setCameraActive }: Props) {
   const insets = useSafeAreaInsets();
+  const [showGuideline, setShowGuideline] = useState(true);
+
+  useEffect(() => {
+    if (setCameraActive) {
+      setCameraActive(!showGuideline);
+    }
+  }, [showGuideline, setCameraActive]);
+
+  // Load the downloaded guideline video.
+  const player = useVideoPlayer(require('@/assets/videos/gaze_guideline.mp4'), (p) => {
+    p.loop = true;
+    p.play();
+  });
 
   const [title, setTitle] = useState('Get ready');
   const [detail, setDetail] = useState('');
-  const [arrow, setArrow] = useState<'◀' | '▶' | '●'>('●');
+  const [dotLayout, setDotLayout] = useState<'left' | 'center' | 'right' | null>(null);
   const [repLabel, setRepLabel] = useState('');
   const [remaining, setRemaining] = useState(0); // seconds, display only
 
@@ -137,26 +114,18 @@ export function GazeRunner({ onDone }: Props) {
     timers.current.forEach((t) => t.cancel());
   };
 
-  const runSetup = async () => {
-    setTitle('Gaze setup');
-    setDetail('Hold the phone to record one eye. Use your free hand as the finger target for the other eye.');
-    setArrow('●');
-    deadline.current = Date.now() + SETUP_MAX_MS;
-    await Promise.race([speakAsync(SETUP_VOICE, 0.9), sleep(SETUP_MAX_MS)]);
-    deadline.current = 0;
-  };
-
-  // Run one timed phase: log its start/end and drive the on-screen guide.
   const runPhase = async (def: PhaseDef, rep: number, countdown: boolean) => {
     const trial: GazeTrial = { phase: def.phase, rep, start_time: nowISO(), end_time: null };
     trialsRef.current.push(trial);
 
     setTitle(def.title);
     setDetail(def.detail);
-    setArrow(def.arrow);
-    Haptics.impactAsync(
-      def.arrow === '●' ? Haptics.ImpactFeedbackStyle.Light : Haptics.ImpactFeedbackStyle.Heavy,
-    ).catch(() => {});
+    setDotLayout(def.dotLayout ?? null);
+
+    if (def.dotLayout) {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    }
+
     Speech.speak(def.voice, { rate: 0.95 });
 
     deadline.current = countdown ? Date.now() + def.ms : 0;
@@ -164,7 +133,6 @@ export function GazeRunner({ onDone }: Props) {
     trial.end_time = nowISO();
   };
 
-  // Display countdown ticker.
   useEffect(() => {
     const id = setInterval(() => {
       if (deadline.current === 0) { setRemaining(0); return; }
@@ -173,38 +141,16 @@ export function GazeRunner({ onDone }: Props) {
     return () => clearInterval(id);
   }, []);
 
-  // Phase sequence runner.
   useEffect(() => {
+    if (showGuideline) return;
     const activeTimers = timers.current;
 
     (async () => {
-      setRepLabel('Setup');
-      await runSetup();
-      if (cancelled.current) return finish(false);
+      setRepLabel('Test Running');
 
-      // Lead-in center hold — recording is already rolling before the first
-      // movement cue.
-      setRepLabel('Setup');
-      await runPhase(
-        {
-          phase: 'center',
-          ms: LEAD_IN_MS,
-          title: 'Start at CENTER',
-          detail: 'Hold your raised finger at center in front of you.',
-          voice: 'Start at the center position in front of you.',
-          arrow: '●',
-        },
-        0,
-        true,
-      );
-      if (cancelled.current) return finish(false);
-
-      for (let rep = 1; rep <= REPS; rep++) {
-        setRepLabel(`Sequence ${rep} of ${REPS}`);
-        for (const def of repPhases()) {
-          if (cancelled.current) return finish(false);
-          await runPhase(def, rep, true);
-        }
+      for (const def of getPhases()) {
+        if (cancelled.current) return finish(false);
+        await runPhase(def, 1, true);
       }
       finish(true);
     })();
@@ -215,7 +161,31 @@ export function GazeRunner({ onDone }: Props) {
       Speech.stop();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [showGuideline]);
+
+  if (showGuideline) {
+    return (
+      <View style={[styles.root, styles.guidelineRoot]}>
+        <View style={styles.guidelineHeader}>
+          <Text style={styles.guidelineTitle}>Video Guideline</Text>
+          <Text style={styles.guidelineSub}>Please watch the instructions before starting.</Text>
+        </View>
+        <View style={styles.videoContainer}>
+          <VideoView player={player} style={styles.video} contentFit="contain" />
+        </View>
+        <View style={[styles.guidelineFooter, { paddingBottom: insets.bottom + 20 }]}>
+          <Pressable 
+            style={styles.startBtn} 
+            onPress={() => {
+              player.pause();
+              setShowGuideline(false);
+            }}>
+            <Text style={styles.startBtnText}>Start Test</Text>
+          </Pressable>
+        </View>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.root}>
@@ -226,17 +196,19 @@ export function GazeRunner({ onDone }: Props) {
         <View style={styles.badge}><Text style={styles.badgeText}>GAZE</Text></View>
       </View>
 
+      <View style={styles.dotsContainer} pointerEvents="none">
+        {dotLayout === 'left' && <View style={[styles.dot, styles.dotLeft]} />}
+        {dotLayout === 'center' && <View style={[styles.dot, styles.dotCenter]} />}
+        {dotLayout === 'right' && <View style={[styles.dot, styles.dotRight]} />}
+      </View>
+
       <View style={styles.center} pointerEvents="none">
-        <Text style={styles.arrow}>{arrow}</Text>
         <Text style={styles.title}>{title}</Text>
         {!!detail && <Text style={styles.detail}>{detail}</Text>}
         {remaining > 0 && <Text style={styles.countdown}>{remaining}</Text>}
       </View>
 
       <View style={[styles.bottom, { paddingBottom: insets.bottom + 10 }]} pointerEvents="box-none">
-        <Text style={styles.hint} pointerEvents="none">
-          Keep head still · other eye follows your finger · 3 cycles
-        </Text>
         <Pressable style={styles.endBtn} onLongPress={exit} delayLongPress={900}>
           <Text style={styles.endText}>■ Hold to End Session</Text>
         </Pressable>
@@ -247,6 +219,22 @@ export function GazeRunner({ onDone }: Props) {
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: 'transparent' },
+  guidelineRoot: { backgroundColor: '#000', zIndex: 10, elevation: 10 },
+  guidelineHeader: { paddingTop: 60, paddingHorizontal: 20, alignItems: 'center' },
+  guidelineTitle: { color: COLORS.text, fontSize: 24, fontWeight: '800' },
+  guidelineSub: { color: COLORS.subtle, fontSize: 16, marginTop: 8, textAlign: 'center' },
+  videoContainer: { flex: 1, marginVertical: 20 },
+  video: { flex: 1 },
+  guidelineFooter: { paddingHorizontal: 20 },
+  startBtn: {
+    backgroundColor: COLORS.accent2,
+    height: 56,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  startBtnText: { color: '#000', fontSize: 18, fontWeight: '700' },
+  
   topBar: {
     position: 'absolute',
     top: 0,
@@ -273,11 +261,28 @@ const styles = StyleSheet.create({
     paddingVertical: 2,
     overflow: 'hidden',
   },
-  center: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 },
-  arrow: { color: COLORS.accent2, fontSize: 96, fontWeight: '900' },
-  title: { color: COLORS.text, fontSize: 30, fontWeight: '800', textAlign: 'center', marginTop: 8 },
-  detail: { color: COLORS.subtle, fontSize: 16, lineHeight: 23, textAlign: 'center', marginTop: 10 },
-  countdown: { color: COLORS.subtle, fontSize: 40, fontWeight: '700', marginTop: 12, fontVariant: ['tabular-nums'] },
+
+  dotsContainer: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  dot: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: COLORS.accent2,
+    position: 'absolute',
+  },
+  dotLeft: { left: 30, top: '50%' },
+  dotRight: { right: 30, top: '50%' },
+  dotCenter: { top: '30%', alignSelf: 'center' },
+
+  center: { position: 'absolute', bottom: 140, left: 24, right: 24, alignItems: 'center' },
+  title: { color: COLORS.text, fontSize: 24, fontWeight: '800', textAlign: 'center', textShadowColor: '#000', textShadowOffset: { width: 1, height: 1 }, textShadowRadius: 3 },
+  detail: { color: COLORS.subtle, fontSize: 16, textAlign: 'center', marginTop: 8, textShadowColor: '#000', textShadowOffset: { width: 1, height: 1 }, textShadowRadius: 2 },
+  countdown: { color: COLORS.accent2, fontSize: 32, fontWeight: '700', marginTop: 12, fontVariant: ['tabular-nums'], textShadowColor: '#000', textShadowOffset: { width: 1, height: 1 }, textShadowRadius: 3 },
+  
   bottom: {
     position: 'absolute',
     bottom: 0,
@@ -286,9 +291,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
     paddingTop: 14,
     backgroundColor: 'rgba(0,0,0,0.55)',
-    gap: 10,
   },
-  hint: { color: COLORS.subtle, fontSize: 13, textAlign: 'center', lineHeight: 19 },
   endBtn: {
     minHeight: 52,
     borderRadius: 12,

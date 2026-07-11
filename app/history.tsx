@@ -1,16 +1,19 @@
-import { useCallback, useState } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useCallback, useState, useEffect } from 'react';
+import { Alert, Pressable, ScrollView, StyleSheet, Text, View, Platform, AppState } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { COLORS, MIN_TAP } from '@/lib/theme';
+import * as IntentLauncher from 'expo-intent-launcher';
 import { clearRuns, exportRuns, loadRuns } from '@/lib/storage';
 import {
   clearVoiceSessions,
   exportVoiceSessions,
   loadVoiceSessions,
 } from '@/lib/voiceStorage';
+import { clearParticipantRegistry } from '@/lib/participantRegistry';
 import { PROTOCOL_LABEL, type Run } from '@/lib/types';
 import type { VoiceSession } from '@/lib/voiceTypes';
+import * as FileSystem from 'expo-file-system/legacy';
 
 function fmt(iso: string): string {
   return new Date(iso).toLocaleString([], {
@@ -48,12 +51,36 @@ export default function History() {
   const [runs, setRuns] = useState<Run[]>([]);
   const [voice, setVoice] = useState<VoiceSession[]>([]);
   const [activeTab, setActiveTab] = useState<HistoryTab>('voice');
+  const [hasStorageAccess, setHasStorageAccess] = useState(true); // default true to avoid flicker on iOS
+
+  const checkStorageAccess = async () => {
+    if (Platform.OS !== 'android') return;
+    try {
+      const RNFS = require('react-native-fs');
+      const testDir = `${RNFS.ExternalStorageDirectoryPath}/Documents/SoberSight`;
+      const testFile = `${testDir}/.test_access`;
+      await RNFS.mkdir(testDir);
+      await RNFS.writeFile(testFile, 'test', 'utf8');
+      await RNFS.unlink(testFile);
+      setHasStorageAccess(true);
+    } catch (e) {
+      setHasStorageAccess(false);
+    }
+  };
 
   const refresh = useCallback(() => {
     loadRuns().then(setRuns);
     loadVoiceSessions().then(setVoice);
+    checkStorageAccess();
   }, []);
   useFocusEffect(refresh);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') checkStorageAccess();
+    });
+    return () => sub.remove();
+  }, []);
 
   const onExport = async () => {
     try {
@@ -70,9 +97,21 @@ export default function History() {
       {
         text: 'Delete',
         style: 'destructive',
-        onPress: async () => { await clearRuns(); await clearVoiceSessions(); refresh(); },
+        onPress: async () => { await clearRuns(); await clearVoiceSessions(); await clearParticipantRegistry(); refresh(); },
       },
     ]);
+  };
+
+  const onGrantStorage = async () => {
+    try {
+      if (Platform.OS === 'android') {
+        await IntentLauncher.startActivityAsync('android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION', {
+          data: 'package:com.ESC.sobersight',
+        });
+      }
+    } catch (e) {
+      Alert.alert('Error', 'Could not open settings.');
+    }
   };
 
   const empty = runs.length === 0 && voice.length === 0;
@@ -96,6 +135,14 @@ export default function History() {
           <Text style={styles.dangerText}>Delete all</Text>
         </Pressable>
       </View>
+
+      {Platform.OS === 'android' && !hasStorageAccess && (
+        <View style={[styles.actions, { paddingTop: 0 }]}>
+          <Pressable style={[styles.primary, { flex: 1, backgroundColor: COLORS.accent2 }]} onPress={onGrantStorage}>
+            <Text style={[styles.primaryText, { color: '#000' }]}>Grant Android Storage Permission</Text>
+          </Pressable>
+        </View>
+      )}
 
       <View style={styles.tabs}>
         <Pressable
@@ -122,18 +169,18 @@ export default function History() {
 
         {activeTab === 'voice' && voice.map((v) => (
           <Pressable
-            key={v.session_id}
+            key={v.session_id || v.started_at}
             style={styles.sessionCard}
-            onPress={() => router.push(`/voice-session/${v.session_id}` as any)}>
+            onPress={() => router.push(`/voice-session/${v.session_id || v.started_at}` as any)}>
             <View style={styles.cardTop}>
               <Text style={styles.cardDate}>{fmt(v.started_at)}</Text>
-              <Text style={styles.sessionCount}>{v.rounds.length}/10 rounds</Text>
+              <Text style={styles.sessionCount}>{v.rounds.filter(Boolean).length}/10 rounds</Text>
             </View>
             <Text style={styles.cardMeta}>
               Participant {v.participant} · groups {v.group_sequence.join(', ')}
             </Text>
             <Text style={styles.cardMeta}>{v.audioUri ? 'Audio saved' : 'No audio'} · JSON detail available</Text>
-            {v.rounds.map((r) => (
+            {v.rounds.filter(Boolean).map((r) => (
               <View key={`${r.round}-${r.group}`} style={styles.protoRow}>
                 <View style={styles.protoMain}>
                   <Text style={styles.cardProtocol}>Round {r.round} · Group {r.group}</Text>

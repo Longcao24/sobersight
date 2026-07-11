@@ -1,5 +1,5 @@
-import { ReactNode, useRef, useState } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ReactNode, useRef, useState, useEffect } from 'react';
+import { Alert, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, KeyboardAvoidingView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import * as Crypto from 'expo-crypto';
@@ -11,6 +11,7 @@ import {
 } from 'expo-camera';
 import { COLORS, MIN_TAP } from '@/lib/theme';
 import { persistRun } from '@/lib/storage';
+import { getAllParticipants } from '@/lib/participantRegistry';
 import { PLRRunner } from '@/components/PLRRunner';
 import { GazeRunner } from '@/components/GazeRunner';
 import { setTorchLevel, turnOffTorch } from '@/modules/torch-level';
@@ -28,9 +29,9 @@ const PLR_TORCH_LEVEL = 1.0;
 const SEQUENCE: Protocol[] = ['PLR', 'horizontal_gaze'];
 
 // Renders the active stimulus runner for a protocol.
-const RUNNERS: Record<Protocol, (onDone: (t: AnyTrial[], c: boolean) => void, setTorch: (on: boolean) => void) => ReactNode> = {
+const RUNNERS: Record<Protocol, (onDone: (t: AnyTrial[], c: boolean) => void, setTorch: (on: boolean) => void, setCameraActive: (active: boolean) => void) => ReactNode> = {
   PLR: (onDone, setTorch) => <PLRRunner onDone={onDone} setTorch={setTorch} />,
-  horizontal_gaze: (onDone) => <GazeRunner onDone={onDone} />,
+  horizontal_gaze: (onDone, setTorch, setCameraActive) => <GazeRunner onDone={onDone} setCameraActive={setCameraActive} />,
 };
 
 function durationMs(trials: AnyTrial[]): number {
@@ -48,11 +49,22 @@ export function SessionFlow() {
   const [index, setIndex] = useState(0); // which protocol in SEQUENCE
   const [runKey, setRunKey] = useState(0); // bump to remount runner + camera per protocol
   const [completed, setCompleted] = useState<Run[]>([]); // finished runs this session
+  const [androidTorch, setAndroidTorch] = useState(false); // android specific torch state
+  const [existingParticipants, setExistingParticipants] = useState<string[]>([]);
+  const [cameraActive, setCameraActive] = useState(true);
+
+  useEffect(() => {
+    getAllParticipants().then(setExistingParticipants);
+  }, []);
 
   // PLR runner toggles the torch; drive it at a controlled brightness via the
   // native TorchLevel module (expo-camera only supports boolean on/off).
   const setTorch = (on: boolean) => {
-    (on ? setTorchLevel(PLR_TORCH_LEVEL) : turnOffTorch()).catch(() => {});
+    if (Platform.OS === 'android') {
+      setAndroidTorch(on);
+    } else {
+      (on ? setTorchLevel(PLR_TORCH_LEVEL) : turnOffTorch()).catch(() => {});
+    }
   };
 
   const sessionId = useRef('');
@@ -147,6 +159,7 @@ export function SessionFlow() {
     videoStoppedAt.current = null;
     recording.current = false;
     setIndex(i);
+    setCameraActive(true);
     setRunKey((k) => k + 1);
     setStage('running');
   };
@@ -197,18 +210,19 @@ export function SessionFlow() {
     // Full-screen back camera behind the runner (single proven recording path).
     return (
       <View key={runKey} style={styles.full}>
-        {canRecord && (
+        {canRecord && cameraActive && (
           <CameraView
             ref={cameraRef}
             style={StyleSheet.absoluteFill}
             facing="back"
             mode="video"
             active
+            enableTorch={Platform.OS === 'android' ? androidTorch : false}
             onCameraReady={startRecording}
             pointerEvents="none"
           />
         )}
-        {RUNNERS[SEQUENCE[index]](onDone, setTorch)}
+        {RUNNERS[SEQUENCE[index]](onDone, setTorch, setCameraActive)}
       </View>
     );
   }
@@ -280,7 +294,8 @@ export function SessionFlow() {
   const permLine = canRecord ? '✓ Camera & mic ready' : 'Camera & mic permission needed to record';
   return (
     <SafeAreaView style={styles.screen}>
-      <ScrollView contentContainerStyle={styles.introBody}>
+      <KeyboardAvoidingView style={styles.screen} behavior="padding" keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 25}>
+        <ScrollView contentContainerStyle={styles.introBody} keyboardShouldPersistTaps="handled">
         <Pressable style={styles.backLink} onPress={() => router.back()} hitSlop={10}>
           <Text style={styles.backLinkText}>‹ Back</Text>
         </Pressable>
@@ -331,13 +346,22 @@ export function SessionFlow() {
           autoCorrect={false}
           returnKeyType="next"
         />
+        {existingParticipants.length > 0 && (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.existingScroll}>
+            {existingParticipants.map(p => (
+              <Pressable key={p} style={styles.existingPill} onPress={() => setParticipantId(p)}>
+                <Text style={styles.existingPillText}>{p}</Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+        )}
 
-        <Text style={styles.fieldLabel}>Tag / note (optional)</Text>
+        <Text style={styles.fieldLabel}>Session (optional)</Text>
         <TextInput
           style={styles.input}
           value={tag}
           onChangeText={setTag}
-          placeholder="e.g. morning, trial 3"
+          placeholder="e.g. session 1"
           placeholderTextColor={COLORS.faint}
           returnKeyType="done"
         />
@@ -352,6 +376,7 @@ export function SessionFlow() {
           </Pressable>
         )}
       </ScrollView>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
@@ -410,6 +435,17 @@ const styles = StyleSheet.create({
     fontSize: 16,
     backgroundColor: COLORS.card,
   },
+  existingScroll: { marginTop: 4, flexDirection: 'row', marginBottom: 4 },
+  existingPill: {
+    backgroundColor: 'rgba(100, 255, 218, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(100, 255, 218, 0.3)',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    marginRight: 6,
+  },
+  existingPillText: { color: COLORS.accent, fontSize: 13, fontWeight: '700' },
   nextCard: {
     backgroundColor: COLORS.card,
     borderRadius: 14,

@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import React, { useRef, useState, useEffect } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -23,6 +23,7 @@ import {
 import { validateVoiceSessionProcedure } from '@/lib/voiceProcedure';
 import { copySessionAudio, persistVoiceSession, voiceSessionJsonPath } from '@/lib/voiceStorage';
 import type { VoiceRecordingState, VoiceRoundLog, VoiceSession, VoiceTransitionDirection } from '@/lib/voiceTypes';
+import { getParticipantNumber, peekParticipantNumber, getParticipantRunCount, incrementParticipantRunCount, getAllParticipants } from '@/lib/participantRegistry';
 
 type Stage = 'setup' | 'roundIntro' | 'task' | 'done';
 
@@ -45,14 +46,44 @@ export function VoiceCommandFlow() {
 
   const [stage, setStage] = useState<Stage>('setup');
   const [participantText, setParticipantText] = useState('');
+  const [selectedRoundText, setSelectedRoundText] = useState('1'); // '1'..'10'
   const [micGranted, setMicGranted] = useState(false);
 
   const [roundIdx, setRoundIdx] = useState(0); // 0..9 — index into the sequence
   const [taskIdx, setTaskIdx] = useState(0); // 0..4 — task within the round
   const [recording, setRecording] = useState(false);
+  const [preview, setPreview] = useState<number[] | null>(null);
+  const [runCount, setRunCount] = useState<number>(0);
+  const [pNumPreview, setPNumPreview] = useState<number>(1);
+  const [existingParticipants, setExistingParticipants] = useState<string[]>([]);
+
+  useEffect(() => {
+    getAllParticipants().then(setExistingParticipants);
+  }, []);
 
   const sessionRef = useRef<VoiceSession | null>(null);
   const sequence = sessionRef.current?.group_sequence ?? [];
+  const isSingleRoundMode = true;
+  const targetRound = parseInt(selectedRoundText, 10);
+
+  // Update preview asynchronously
+  useEffect(() => {
+    const p = participantText.trim();
+    if (!p) {
+      setPreview(null);
+      setRunCount(0);
+      return;
+    }
+    Promise.all([
+      peekParticipantNumber(p),
+      getParticipantRunCount(p)
+    ]).then(([num, rc]) => {
+      setPreview(groupSequenceFor(p, num ?? undefined));
+      setRunCount(rc);
+      setPNumPreview(num ?? 1);
+    });
+  }, [participantText]);
+
   const currentRecordingState = (): VoiceRecordingState => (recording ? 'recording' : 'not_recording');
 
   // ---- permissions ----
@@ -69,11 +100,17 @@ export function VoiceCommandFlow() {
 
   // ---- session lifecycle ----
   const beginSession = async () => {
-    const participant = parseInt(participantText.trim(), 10);
-    if (!Number.isInteger(participant) || participant < 1) {
-      Alert.alert('Participant number', 'Enter a whole participant number (1 or greater).');
+    const participant = participantText.trim();
+    if (!participant) {
+      Alert.alert('Participant ID', 'Enter a participant identifier (text or number).');
       return;
     }
+
+    const pNum = await getParticipantNumber(participant);
+    const rc = await getParticipantRunCount(participant);
+    const seqIdx = targetRound - 1;
+    const fullSeq = groupSequenceFor(participant, pNum);
+    const assignedGroup = fullSeq[seqIdx];
 
     const status = await AudioModule.requestRecordingPermissionsAsync();
     setMicGranted(status.granted);
@@ -86,7 +123,8 @@ export function VoiceCommandFlow() {
       kind: 'voice_command',
       session_id: Crypto.randomUUID(),
       participant,
-      group_sequence: groupSequenceFor(participant),
+      participant_number: pNum,
+      group_sequence: [assignedGroup],
       started_at: nowISO(),
       ended_at: null,
       audioStartedAt: null,
@@ -190,7 +228,7 @@ export function VoiceCommandFlow() {
     const group = session.group_sequence[rIdx];
     const tasks = tasksForGroup(group);
     const roundLog: VoiceRoundLog = {
-      round: rIdx + 1,
+      round: targetRound,
       group,
       groupId: `G${group}`,
       audioStartedAt: session.audioStartedAt,
@@ -202,7 +240,7 @@ export function VoiceCommandFlow() {
         taskId: t.taskCode,
         group: t.group,
         groupId: t.groupId,
-        round: rIdx + 1,
+        round: targetRound,
         taskIndex: i + 1,
         type: t.type,
         sceneId: t.sceneId,
@@ -234,8 +272,9 @@ export function VoiceCommandFlow() {
     }
     session.audioStoppedAt = nowISO();
     setRecording(false);
-    if (uri) session.audioUri = copySessionAudio(session, uri);
+    if (uri) session.audioUri = await copySessionAudio(session, uri);
     for (const round of session.rounds) {
+      if (!round) continue;
       round.audioStartedAt = session.audioStartedAt;
       round.audioStoppedAt = session.audioStoppedAt;
       round.audioUri = null;
@@ -248,13 +287,14 @@ export function VoiceCommandFlow() {
     const session = sessionRef.current;
     if (!session) return;
     const rIdx = roundIdx;
-    const isLast = rIdx >= NUM_GROUPS - 1;
+    const isLast = rIdx >= NUM_GROUPS - 1 || isSingleRoundMode;
     stampLeft(rIdx, taskIdx, early ? 'end_session' : 'end_round');
 
     if (early || isLast) {
       session.ended_at = nowISO();
       await stopSessionRecording(session);
       if (!early && isLast) {
+        // If single round, we consider it completed if that round is done
         const result = validateVoiceSessionProcedure(session, { audioFileExists: audioFileExists(session.audioUri) });
         session.completed = result.valid;
         if (!result.valid) {
@@ -266,6 +306,9 @@ export function VoiceCommandFlow() {
     }
     try {
       await persistVoiceSession(session);
+      if (!early && isLast) {
+        await incrementParticipantRunCount(session.participant);
+      }
     } catch (e) {
       Alert.alert('Save warning', `Could not fully save: ${String(e)}`);
     }
@@ -308,19 +351,21 @@ export function VoiceCommandFlow() {
   // ============================== RENDER ==============================
 
   if (stage === 'roundIntro') {
-    const round = roundIdx + 1;
+    const round = targetRound;
     const group = sequence[roundIdx];
     return (
       <SafeAreaView style={styles.screen}>
         <View style={styles.centerBody}>
-          <Text style={styles.roundKicker}>ROUND {round} OF {NUM_GROUPS}</Text>
-          {round === 1 && <Text style={styles.baseline}>Sober baseline</Text>}
+          <View style={styles.roundTag}>
+            <Text style={styles.roundTagText}>ROUND {round}</Text>
+          </View>
           <Text style={styles.roundTitle}>5 voice commands</Text>
           <Text style={styles.roundSub}>
-            For each card: imagine you are driving, then say the command out loud. One audio file records the whole test.
+            For each card: imagine you are driving, then say the command out loud.
           </Text>
           <View style={styles.metaCard}>
-            <Text style={styles.metaText}>Participant {sessionRef.current?.participant} · Group {group}</Text>
+            <Text style={styles.metaText}>Participant ID: {sessionRef.current?.participant}</Text>
+            <Text style={styles.metaSub}>Group {group} · Sequence Order {roundIdx + 1}</Text>
           </View>
           <Pressable style={styles.primary} onPress={() => void startRound(roundIdx)}>
             <Text style={styles.primaryText}>Start round  ●</Text>
@@ -340,9 +385,14 @@ export function VoiceCommandFlow() {
     return (
       <SafeAreaView style={styles.screen}>
         <View style={styles.taskHeader}>
-          <Text style={styles.crumb}>
-            Round {roundIdx + 1}/{NUM_GROUPS} · {t.groupId} · {t.taskCode} · Task {taskIdx + 1}/{tasks.length}
-          </Text>
+          <View style={styles.headerLeft}>
+            <View style={styles.inlineRoundTag}>
+              <Text style={styles.inlineRoundTagText}>R{targetRound}</Text>
+            </View>
+            <Text style={styles.crumb}>
+              P{sessionRef.current?.participant} · {t.groupId} · Task {taskIdx + 1}/5
+            </Text>
+          </View>
           <View style={styles.recPill}>
             <View style={[styles.recDot, !recording && styles.recDotOff]} />
             <Text style={[styles.recText, !recording && styles.recTextOff]}>{recording ? 'REC' : 'NO AUDIO'}</Text>
@@ -380,7 +430,7 @@ export function VoiceCommandFlow() {
 
   if (stage === 'done') {
     const session = sessionRef.current;
-    const doneRounds = session?.rounds.length ?? 0;
+    const doneRounds = session?.rounds.filter(Boolean).length ?? 0;
     return (
       <SafeAreaView style={styles.screen}>
         <ScrollView contentContainerStyle={styles.centerBody}>
@@ -400,8 +450,6 @@ export function VoiceCommandFlow() {
   }
 
   // ---- setup ----
-  const participant = parseInt(participantText.trim(), 10);
-  const preview = Number.isInteger(participant) && participant >= 1 ? groupSequenceFor(participant) : null;
   return (
     <SafeAreaView style={styles.screen}>
       <ScrollView contentContainerStyle={styles.setupBody}>
@@ -414,17 +462,47 @@ export function VoiceCommandFlow() {
           sober baseline.
         </Text>
 
-        <Text style={styles.fieldLabel}>Participant number</Text>
-        <TextInput
-          style={styles.input}
-          value={participantText}
-          onChangeText={setParticipantText}
-          placeholder="e.g. 1"
-          placeholderTextColor={COLORS.faint}
-          keyboardType="number-pad"
-          returnKeyType="done"
-        />
-        {preview && <Text style={styles.seqLine}>Group order: {preview.join(', ')}</Text>}
+        <View style={styles.inputGroup}>
+          <Text style={styles.fieldLabel}>Participant ID</Text>
+          <TextInput
+            style={styles.input}
+            value={participantText}
+            onChangeText={setParticipantText}
+            placeholder="e.g. P1 or 123"
+            placeholderTextColor={COLORS.faint}
+            keyboardType="default"
+            autoCapitalize="characters"
+            returnKeyType="done"
+          />
+          {existingParticipants.length > 0 && (
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.existingScroll}>
+              {existingParticipants.map(p => (
+                <Pressable key={p} style={styles.existingPill} onPress={() => setParticipantText(p)}>
+                  <Text style={styles.existingPillText}>{p}</Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+          )}
+        </View>
+
+        <View style={styles.inputGroup}>
+          <Text style={styles.fieldLabel}>Round Selection</Text>
+          <View style={styles.roundButtons}>
+            {['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'].map((r) => (
+              <Pressable
+                key={r}
+                style={[styles.roundBtn, selectedRoundText === r && styles.roundBtnActive]}
+                onPress={() => setSelectedRoundText(r)}
+              >
+                <Text style={[styles.roundBtnText, selectedRoundText === r && styles.roundBtnTextActive]}>{r}</Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
+
+        {preview && targetRound ? (
+          <Text style={styles.seqLine}>Targeting Round {targetRound} (Group {preview[targetRound - 1]}, Participant No. {pNumPreview})</Text>
+        ) : null}
 
         <Text style={[styles.permLine, { color: micGranted ? COLORS.ok : COLORS.subtle }]}>
           {micGranted ? '✓ Microphone ready' : 'Microphone permission needed to record'}
@@ -453,6 +531,14 @@ const styles = StyleSheet.create({
   bigTitle: { color: COLORS.text, fontSize: 30, fontWeight: '800' },
 
   // round intro / done
+  roundTag: {
+    backgroundColor: COLORS.accent,
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+    borderRadius: 20,
+    marginBottom: 4,
+  },
+  roundTagText: { color: '#06281F', fontSize: 18, fontWeight: '900' },
   roundKicker: { color: COLORS.accent2, fontSize: 14, fontWeight: '800', letterSpacing: 2 },
   baseline: { color: COLORS.accent, fontSize: 13, fontWeight: '700', letterSpacing: 1 },
   roundTitle: { color: COLORS.text, fontSize: 26, fontWeight: '800', textAlign: 'center' },
@@ -464,8 +550,10 @@ const styles = StyleSheet.create({
     borderColor: COLORS.cardBorder,
     paddingHorizontal: 18,
     paddingVertical: 12,
+    alignItems: 'center',
   },
-  metaText: { color: COLORS.text, fontSize: 15, fontWeight: '700' },
+  metaText: { color: COLORS.text, fontSize: 16, fontWeight: '800' },
+  metaSub: { color: COLORS.subtle, fontSize: 13, fontWeight: '500', marginTop: 2 },
   checkmark: { color: COLORS.ok, fontSize: 56, fontWeight: '900' },
   seqLine: { color: COLORS.faint, fontSize: 13, textAlign: 'center' },
 
@@ -477,7 +565,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
     paddingVertical: 10,
   },
-  crumb: { flex: 1, color: COLORS.subtle, fontSize: 13, fontWeight: '600', paddingRight: 8 },
+  headerLeft: { flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 },
+  inlineRoundTag: {
+    backgroundColor: COLORS.accent,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  inlineRoundTagText: { color: '#06281F', fontSize: 12, fontWeight: '900' },
+  crumb: { color: COLORS.subtle, fontSize: 14, fontWeight: '700' },
   recPill: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   recDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: COLORS.danger },
   recDotOff: { backgroundColor: COLORS.faint },
@@ -521,6 +617,7 @@ const styles = StyleSheet.create({
   endStripText: { color: COLORS.faint, fontSize: 13 },
 
   // shared
+  inputGroup: { gap: 4 },
   fieldLabel: { color: COLORS.subtle, fontSize: 13, marginTop: 8 },
   input: {
     minHeight: MIN_TAP,
@@ -532,6 +629,31 @@ const styles = StyleSheet.create({
     fontSize: 16,
     backgroundColor: COLORS.card,
   },
+  existingScroll: { marginTop: 4, flexDirection: 'row' },
+  existingPill: {
+    backgroundColor: 'rgba(100, 255, 218, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(100, 255, 218, 0.3)',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    marginRight: 6,
+  },
+  existingPillText: { color: COLORS.accent, fontSize: 13, fontWeight: '700' },
+  roundButtons: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  roundBtn: {
+    minWidth: 44,
+    height: 38,
+    borderRadius: 8,
+    backgroundColor: COLORS.card,
+    borderWidth: 1,
+    borderColor: COLORS.cardBorder,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  roundBtnActive: { backgroundColor: COLORS.accent, borderColor: COLORS.accent },
+  roundBtnText: { color: COLORS.text, fontSize: 14, fontWeight: '600' },
+  roundBtnTextActive: { color: '#06281F' },
   permLine: { fontSize: 13, marginTop: 4 },
   primary: {
     minHeight: 56,

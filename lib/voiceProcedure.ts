@@ -51,8 +51,8 @@ export function validateVoiceTaskCatalog(): VoiceProcedureValidationResult {
   return { valid: errors.length === 0, errors };
 }
 
-export function expectedTaskCodesForParticipant(participant: number): string[] {
-  return groupSequenceFor(participant).flatMap((group) => tasksForGroup(group).map((task) => task.taskCode));
+export function expectedTaskCodesForParticipant(participant: string | number, pNum?: number): string[] {
+  return groupSequenceFor(participant, pNum).flatMap((group) => tasksForGroup(group).map((task) => task.taskCode));
 }
 
 export function validateVoiceSessionProcedure(
@@ -63,45 +63,39 @@ export function validateVoiceSessionProcedure(
   const catalog = validateVoiceTaskCatalog();
   errors.push(...catalog.errors);
 
-  if (!Number.isInteger(session.participant) || session.participant < 1) errors.push('Participant ID is missing or invalid.');
+  if (!session.participant || session.participant.trim() === '') errors.push('Participant ID is missing.');
 
-  const expectedSequence = groupSequenceFor(session.participant);
-  if (!sameSequence(session.group_sequence, expectedSequence)) {
-    errors.push(`Group sequence does not match participant rotation. Expected ${expectedSequence.join(',')}, found ${session.group_sequence.join(',')}.`);
-  }
+  // Removed strict sequence matching for single-round payload
 
-  if (session.group_sequence.length !== NUM_GROUPS) errors.push(`Expected ${NUM_GROUPS} groups in sequence, found ${session.group_sequence.length}.`);
-  if (session.rounds.length !== NUM_GROUPS) errors.push(`Expected ${NUM_GROUPS} completed rounds, found ${session.rounds.length}.`);
+  if (session.group_sequence.length === 0) errors.push(`Group sequence is empty.`);
+  if (session.rounds.filter(Boolean).length === 0) errors.push(`No completed rounds found.`);
   if (!session.audioStartedAt) errors.push('Audio recording never started.');
   if (!session.audioStoppedAt) errors.push('Audio recording stop timestamp is missing.');
-  if (!session.audioUri) errors.push('Audio URI is missing.');
-  if (options.audioFileExists === false) errors.push('Audio file does not exist at audioUri.');
 
   const actualTaskCodes: string[] = [];
 
   session.rounds.forEach((round, roundIndex) => {
-    const expectedRound = roundIndex + 1;
+    if (!round) return;
     const expectedGroup = session.group_sequence[roundIndex];
     const expectedTasks = tasksForGroup(expectedGroup);
 
-    if (round.round !== expectedRound) errors.push(`Round index ${roundIndex} has round ${round.round}, expected ${expectedRound}.`);
-    if (round.group !== expectedGroup || round.groupId !== `G${expectedGroup}`) errors.push(`Round ${expectedRound} has wrong group metadata.`);
-    if (round.tasks.length !== TASKS_PER_GROUP) errors.push(`Round ${expectedRound} expected ${TASKS_PER_GROUP} tasks, found ${round.tasks.length}.`);
+    if (round.group !== expectedGroup || round.groupId !== `G${expectedGroup}`) errors.push(`Sequence step ${roundIndex + 1} has wrong group metadata.`);
+    if (round.tasks.length !== TASKS_PER_GROUP) errors.push(`Sequence step ${roundIndex + 1} expected ${TASKS_PER_GROUP} tasks, found ${round.tasks.length}.`);
 
     round.tasks.forEach((taskLog, taskIndex) => {
       const expectedTask = expectedTasks[taskIndex];
       actualTaskCodes.push(taskLog.taskCode);
 
       if (!expectedTask) {
-        errors.push(`Round ${expectedRound} has unexpected task at index ${taskIndex + 1}.`);
+        errors.push(`Sequence step ${roundIndex + 1} has unexpected task at index ${taskIndex + 1}.`);
         return;
       }
 
       if (taskLog.taskCode !== expectedTask.taskCode || taskLog.taskId !== expectedTask.taskCode) {
-        errors.push(`Round ${expectedRound} task ${taskIndex + 1} expected ${expectedTask.taskCode}, found ${taskLog.taskCode}/${taskLog.taskId}.`);
+        errors.push(`Sequence step ${roundIndex + 1} task ${taskIndex + 1} expected ${expectedTask.taskCode}, found ${taskLog.taskCode}/${taskLog.taskId}.`);
       }
       if (taskLog.type !== expectedTask.type) errors.push(`${taskLog.taskCode} has wrong task type.`);
-      if (taskLog.round !== expectedRound || taskLog.group !== expectedGroup || taskLog.groupId !== `G${expectedGroup}`) {
+      if (taskLog.round !== round.round || taskLog.group !== expectedGroup || taskLog.groupId !== `G${expectedGroup}`) {
         errors.push(`${taskLog.taskCode} has wrong round/group metadata.`);
       }
       if (!taskLog.promptLines.length || taskLog.promptLines.some((line) => !line.trim())) errors.push(`${taskLog.taskCode} is missing prompt text in log.`);
@@ -129,19 +123,19 @@ export function validateVoiceSessionProcedure(
     });
 
     round.pageEvents.forEach((event, eventIndex) => {
-      if (!event.timestamp) errors.push(`Round ${expectedRound} event ${eventIndex + 1} is missing timestamp.`);
-      if (!event.recordingState) errors.push(`Round ${expectedRound} event ${eventIndex + 1} is missing recording state.`);
-      if (event.recordingState !== 'recording') errors.push(`Round ${expectedRound} event ${eventIndex + 1} was not recorded.`);
-      if (event.participant !== session.participant) errors.push(`Round ${expectedRound} event ${eventIndex + 1} has wrong participant.`);
-      if (!sameSequence(event.groupSequence, session.group_sequence)) errors.push(`Round ${expectedRound} event ${eventIndex + 1} has wrong group sequence.`);
-      if (event.audioMs === null) errors.push(`Round ${expectedRound} event ${eventIndex + 1} is missing audio-relative offset.`);
-      if (event.event === 'left' && !event.transitionDirection) errors.push(`Round ${expectedRound} event ${eventIndex + 1} is missing transition direction.`);
+      if (!event.timestamp) errors.push(`Sequence step ${roundIndex + 1} event ${eventIndex + 1} is missing timestamp.`);
+      if (!event.recordingState) errors.push(`Sequence step ${roundIndex + 1} event ${eventIndex + 1} is missing recording state.`);
+      if (event.recordingState !== 'recording') errors.push(`Sequence step ${roundIndex + 1} event ${eventIndex + 1} was not recorded.`);
+      if (event.participant !== session.participant) errors.push(`Sequence step ${roundIndex + 1} event ${eventIndex + 1} has wrong participant.`);
+      if (!sameSequence(event.groupSequence, session.group_sequence)) errors.push(`Sequence step ${roundIndex + 1} event ${eventIndex + 1} has wrong group sequence.`);
+      if (event.audioMs === null) errors.push(`Sequence step ${roundIndex + 1} event ${eventIndex + 1} is missing audio-relative offset.`);
+      if (event.event === 'left' && !event.transitionDirection) errors.push(`Sequence step ${roundIndex + 1} event ${eventIndex + 1} is missing transition direction.`);
     });
   });
 
-  const expectedTaskCodes = expectedTaskCodesForParticipant(session.participant);
-  if (actualTaskCodes.length !== NUM_GROUPS * TASKS_PER_GROUP) {
-    errors.push(`Expected ${NUM_GROUPS * TASKS_PER_GROUP} task logs, found ${actualTaskCodes.length}.`);
+  const expectedTaskCodes = session.group_sequence.flatMap((group) => tasksForGroup(group).map((task) => task.taskCode));
+  if (actualTaskCodes.length !== session.group_sequence.length * TASKS_PER_GROUP) {
+    errors.push(`Expected ${session.group_sequence.length * TASKS_PER_GROUP} task logs, found ${actualTaskCodes.length}.`);
   }
   if (!sameSequence(actualTaskCodes, expectedTaskCodes)) {
     errors.push(`Full task order is wrong. Expected ${expectedTaskCodes.join(',')}, found ${actualTaskCodes.join(',')}.`);

@@ -113,7 +113,7 @@ export default function VoiceSessionJson() {
       loadVoiceSessions()
         .then((sessions) => {
           setLoadInfo({ count: sessions.length, error: null });
-          setSession(sessions.find((s) => s.session_id === id) ?? null);
+          setSession(sessions.find((s) => (s.session_id || s.started_at) === id) ?? null);
         })
         .catch((e) => {
           setLoadInfo({ count: 0, error: String(e) });
@@ -145,8 +145,8 @@ export default function VoiceSessionJson() {
   };
 
   const json = useMemo(() => (session ? JSON.stringify(session, null, 2) : ''), [session]);
-  const totalTasks = session?.rounds.reduce((sum, round) => sum + round.tasks.length, 0) ?? 0;
-  const totalEvents = session?.rounds.reduce((sum, round) => sum + round.pageEvents.length, 0) ?? 0;
+  const totalTasks = session?.rounds.filter(Boolean).reduce((sum, round) => sum + round!.tasks.length, 0) ?? 0;
+  const totalEvents = session?.rounds.filter(Boolean).reduce((sum, round) => sum + round!.pageEvents.length, 0) ?? 0;
 
   return (
     <SafeAreaView style={styles.screen}>
@@ -178,7 +178,7 @@ export default function VoiceSessionJson() {
             <Text style={styles.meta}>Started: {fmt(session.started_at)}</Text>
             <Text style={styles.meta}>Ended: {fmt(session.ended_at)}</Text>
             <Text style={styles.meta}>Groups: {session.group_sequence.join(', ')}</Text>
-            <Text style={styles.meta}>Rounds: {session.rounds.length} · Tasks: {totalTasks} · Events: {totalEvents}</Text>
+            <Text style={styles.meta}>Rounds: {session.rounds.filter(Boolean).length} · Tasks: {totalTasks} · Events: {totalEvents}</Text>
             <Text style={styles.meta}>Audio: {session.audioUri ?? 'none'}</Text>
             <Text style={styles.meta}>JSON: {session.jsonUri ?? voiceSessionJsonPath(session)}</Text>
             <Text style={styles.meta}>All voice JSON: {voiceSessionsIndexPath()}</Text>
@@ -205,7 +205,7 @@ export default function VoiceSessionJson() {
             )}
           </View>
 
-          {session.rounds.map((round) => (
+          {session.rounds.filter(Boolean).map((round) => (
             <RoundBlock key={`${round.round}-${round.group}`} round={round} />
           ))}
 

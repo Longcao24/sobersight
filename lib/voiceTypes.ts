@@ -38,7 +38,7 @@ export interface VoicePageEvent {
   event: 'shown' | 'left';
   timestamp: string;
   audioMs: number | null;
-  participant: number;
+  participant: string;
   groupSequence: number[];
   round: number;
   group: number;
@@ -67,7 +67,8 @@ export interface VoiceRoundLog {
 export interface VoiceSession {
   kind: 'voice_command';
   session_id: string;
-  participant: number; // participant number entered at setup
+  participant: string; // participant identifier entered at setup
+  participant_number?: number; // assigned index based on the order of unique participants
   group_sequence: number[]; // group ids in round order, length 10
   started_at: string; // ISO8601
   ended_at: string | null; // ISO8601

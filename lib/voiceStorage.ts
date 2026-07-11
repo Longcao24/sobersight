@@ -9,14 +9,16 @@
 //   Documents/SoberSight/voice_command_sessions.json
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Directory, File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
+import * as FileSystem from 'expo-file-system/legacy';
+import RNFS from 'react-native-fs';
+import { Platform } from 'react-native';
 import type { VoiceSession } from './voiceTypes';
 
 const KEY = 'sobersight_voice_v1';
 const ROOT_DIR = 'SoberSight';
-const VOICE_DIR = 'voice_command';
-const VOICE_INDEX_FILE = 'voice_command_sessions.json';
+const VOICE_DIR = 'VoiceCommand';
+const VOICE_INDEX_FILE = 'voice_sessions_index.json';
 
 function localStamp(iso: string): string {
   const d = new Date(iso);
@@ -24,24 +26,49 @@ function localStamp(iso: string): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`;
 }
 
-function rootDir(): Directory {
-  const base = new Directory(Paths.document, ROOT_DIR);
-  if (!base.exists) base.create();
-  return base;
+function getBaseUri(): string {
+  return Platform.OS === 'android' 
+    ? `${RNFS.ExternalStorageDirectoryPath}/Documents/${ROOT_DIR}`
+    : `${FileSystem.documentDirectory}${ROOT_DIR}`;
 }
 
-// Per-session folder. Stable for the whole run so the JSON and final audio land
-// together beside eye-tracking protocol folders in Documents/SoberSight.
-function sessionDir(session: VoiceSession): Directory {
-  const sessionRoot = new Directory(rootDir(), localStamp(session.started_at));
-  if (!sessionRoot.exists) sessionRoot.create();
-  const dir = new Directory(sessionRoot, VOICE_DIR);
-  if (!dir.exists) dir.create();
-  return dir;
+async function makeDirectory(path: string) {
+  if (Platform.OS === 'android') {
+    await RNFS.mkdir(path.replace('file://', ''));
+  } else {
+    await FileSystem.makeDirectoryAsync(path, { intermediates: true });
+  }
+}
+
+async function copyFile(from: string, to: string) {
+  if (Platform.OS === 'android') {
+    await RNFS.copyFile(from.replace('file://', ''), to.replace('file://', ''));
+  } else {
+    await FileSystem.copyAsync({ from, to });
+  }
+}
+
+async function writeString(path: string, contents: string) {
+  if (Platform.OS === 'android') {
+    await RNFS.writeFile(path.replace('file://', ''), contents, 'utf8');
+  } else {
+    await FileSystem.writeAsStringAsync(path, contents);
+  }
+}
+
+async function getSessionDirUri(session: VoiceSession): Promise<string> {
+  const baseUri = getBaseUri();
+  const pId = session.participant || 'Unassigned';
+  const sessionDirName = `${VOICE_DIR}_${localStamp(session.started_at)}`;
+  const dirUri = `${baseUri}/${pId}/${sessionDirName}`;
+  
+  await makeDirectory(dirUri);
+  return dirUri;
 }
 
 export function voiceSessionFolderName(session: VoiceSession): string {
-  return `${localStamp(session.started_at)}/${VOICE_DIR}`;
+  const pId = session.participant || 'Unassigned';
+  return `${pId}/${VOICE_DIR}_${localStamp(session.started_at)}`;
 }
 
 export function voiceSessionJsonPath(session: VoiceSession): string {
@@ -52,12 +79,11 @@ export function voiceSessionsIndexPath(): string {
   return `Documents/${ROOT_DIR}/${VOICE_INDEX_FILE}`;
 }
 
-function writeVoiceSessionsIndex(sessions: VoiceSession[]): void {
+async function writeVoiceSessionsIndex(sessions: VoiceSession[]): Promise<void> {
   try {
-    const file = new File(rootDir(), VOICE_INDEX_FILE);
-    if (file.exists) file.delete();
-    file.create();
-    file.write(JSON.stringify(sessions, null, 2));
+    const baseUri = getBaseUri();
+    await makeDirectory(baseUri);
+    await writeString(`${baseUri}/${VOICE_INDEX_FILE}`, JSON.stringify(sessions, null, 2));
   } catch (e) {
     console.warn('writeVoiceSessionsIndex: failed', e);
   }
@@ -66,29 +92,47 @@ function writeVoiceSessionsIndex(sessions: VoiceSession[]): void {
 // Copy the freshly recorded whole-test audio file out of the cache into the session
 // folder. Returns the permanent uri, or the raw uri if the copy fails (so the
 // recording is never lost). Best-effort: never throws.
-export function copySessionAudio(session: VoiceSession, rawUri: string): string {
+export async function copySessionAudio(session: VoiceSession, uri: string): Promise<string> {
   try {
-    const dir = sessionDir(session);
-    const ext = (rawUri.split('.').pop() || 'm4a').split('?')[0];
-    const af = new File(dir, `voice_command_audio.${ext}`);
-    if (af.exists) af.delete();
-    new File(rawUri).copy(af);
-    return af.uri;
+    const dirUri = await getSessionDirUri(session);
+    const ext = uri.split('.').pop() || 'wav';
+    const filename = `voice_audio_${session.rounds ? session.rounds.filter(Boolean).length : 0}.${ext}`;
+    const destUri = `${dirUri}/${filename}`;
+
+    await copyFile(uri, destUri);
+
+    // Try to delete original cache file safely
+    try {
+      await FileSystem.deleteAsync(uri, { idempotent: true });
+    } catch (e) {}
+
+    return destUri;
   } catch (e) {
     console.warn('copySessionAudio: failed, keeping cache uri', e);
-    return rawUri;
+    return uri;
   }
 }
 
 // Write/refresh the session.json at the session folder root. Best-effort.
-export function writeVoiceSessionJson(session: VoiceSession): void {
+export async function writeVoiceSessionJson(session: VoiceSession): Promise<void> {
   try {
-    const dir = sessionDir(session);
-    const jf = new File(dir, 'session.json');
-    if (jf.exists) jf.delete();
-    jf.create();
-    session.jsonUri = jf.uri;
-    jf.write(JSON.stringify(session, null, 2));
+    const dirUri = await getSessionDirUri(session);
+    const jfUri = `${dirUri}/session.json`;
+    session.jsonUri = jfUri;
+
+    const exportData: any = { ...session };
+    delete exportData.audioUri;
+    delete exportData.jsonUri;
+    if (exportData.rounds) {
+      exportData.rounds = exportData.rounds.map((r: any) => {
+        if (!r) return r;
+        const copy = { ...r };
+        delete copy.audioUri;
+        return copy;
+      });
+    }
+
+    await writeString(jfUri, JSON.stringify(exportData, null, 2));
   } catch (e) {
     console.warn('writeVoiceSessionJson: failed', e);
   }
@@ -112,13 +156,13 @@ export async function saveVoiceSession(session: VoiceSession): Promise<void> {
   const next = all.filter((s) => s.session_id !== session.session_id);
   next.unshift(session);
   await AsyncStorage.setItem(KEY, JSON.stringify(next));
-  writeVoiceSessionsIndex(next);
+  await writeVoiceSessionsIndex(next);
 }
 
 // Persist a session everywhere: AsyncStorage index + Documents session.json.
 // Never throws — structured data is always saved.
 export async function persistVoiceSession(session: VoiceSession): Promise<void> {
-  writeVoiceSessionJson(session);
+  await writeVoiceSessionJson(session);
   await saveVoiceSession(session);
 }
 

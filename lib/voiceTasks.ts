@@ -160,12 +160,27 @@ export const GROUPS: VoiceTask[][] = [
   ],
 ];
 
-// Group presentation order for a participant (1-based id), rotated by one group
-// per participant. Returns the group numbers (1..10) in round order, e.g.
+// Group presentation order for a participant, rotated by one group per
+// participant. Returns the group numbers (1..10) in round order, e.g.
 //   P1 -> [1,2,3,4,5,6,7,8,9,10]
 //   P2 -> [2,3,4,5,6,7,8,9,10,1]
-export function groupSequenceFor(participant: number): number[] {
-  const offset = ((participant - 1) % NUM_GROUPS + NUM_GROUPS) % NUM_GROUPS;
+export function groupSequenceFor(participant: string | number, explicitPNum?: number): number[] {
+  let pNum = 1;
+  if (explicitPNum !== undefined && explicitPNum > 0) {
+    pNum = explicitPNum;
+  } else if (typeof participant === 'number') {
+    pNum = participant;
+  } else {
+    const parsed = parseInt(participant, 10);
+    if (!isNaN(parsed)) {
+      pNum = parsed;
+    } else {
+      // Fallback for text IDs: use a simple sum of char codes to pick a rotation
+      pNum = Array.from(participant).reduce((sum, char) => sum + char.charCodeAt(0), 0) || 1;
+    }
+  }
+
+  const offset = ((pNum - 1) % NUM_GROUPS + NUM_GROUPS) % NUM_GROUPS;
   return Array.from({ length: NUM_GROUPS }, (_, k) => ((offset + k) % NUM_GROUPS) + 1);
 }
 

@@ -13,26 +13,7 @@ export interface PLRTrial {
   end_time: string | null; // ISO8601
 }
 
-// --- Horizontal gaze (self-test finger target) ---
-// The participant holds the phone with the rear-camera attachment recording one
-// eye while the other eye follows their own raised finger target. One GazeTrial
-// per movement phase. Phase names
-// encode the side, so no separate direction field is needed.
-//   center             — finger held at center (lead-in, once)
-//   move_right         — center → participant's right (3s)
-//   hold_right         — finger held on the right (1s)
-//   center_from_right  — right → center
-//   move_left          — center → participant's left, almost out of view (3s)
-//   hold_left          — finger held on the left (1s)
-//   center_from_left   — left → center
-export type GazePhase =
-  | 'center'
-  | 'move_right'
-  | 'hold_right'
-  | 'center_from_right'
-  | 'move_left'
-  | 'hold_left'
-  | 'center_from_left';
+export type GazePhase = string;
 
 export interface GazeTrial {
   phase: GazePhase;
